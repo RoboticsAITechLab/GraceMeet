@@ -1,4 +1,4 @@
-# Replace with your Azure VM domain or custom church domain (e.g. livekit.yourchurch.org)
+# Reverse proxy to LiveKit server running on host network
 {$LIVEKIT_DOMAIN:localhost} {
-  reverse_proxy livekit:7880
+  reverse_proxy 127.0.0.1:7880
 }
