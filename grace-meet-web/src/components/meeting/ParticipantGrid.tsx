@@ -6,9 +6,13 @@ import { Sparkles } from "lucide-react";
 
 interface ParticipantGridProps {
   tracks: TrackReferenceOrPlaceholder[];
+  raisedHands?: Record<string, boolean>;
 }
 
-export default function ParticipantGrid({ tracks }: ParticipantGridProps) {
+export default function ParticipantGrid({
+  tracks,
+  raisedHands = {},
+}: ParticipantGridProps) {
   if (tracks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center p-6 bg-slate-900/60 border border-slate-800 rounded-2xl max-w-xs sm:max-w-md mx-auto">
@@ -55,12 +59,19 @@ export default function ParticipantGrid({ tracks }: ParticipantGridProps) {
         const key =
           track.publication?.trackSid ||
           `${track.participant.identity}-${track.source}`;
+        const isHandRaised = !!raisedHands[track.participant.identity];
 
         return (
           <div
             key={key}
             className="relative w-full h-full min-h-0 flex items-center justify-center rounded-xl sm:rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 shadow-md"
           >
+            {isHandRaised && (
+              <div className="absolute top-2 left-2 z-20 bg-amber-500 text-slate-950 text-[10px] font-bold px-2 py-0.5 rounded-full shadow-lg flex items-center gap-1 animate-bounce pointer-events-none">
+                <span>✋</span>
+                <span className="hidden xs:inline">Hand Raised</span>
+              </div>
+            )}
             <ParticipantTile
               trackRef={track}
               className="w-full h-full object-cover"

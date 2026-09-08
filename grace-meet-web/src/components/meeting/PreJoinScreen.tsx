@@ -19,6 +19,7 @@ import {
   Share2,
   Copy,
   Check,
+  SwitchCamera,
 } from "lucide-react";
 import ShareInvite from "./ShareInvite";
 import { getMeetingUrl } from "@/lib/utils/meetingId";
@@ -27,6 +28,7 @@ export interface PreJoinChoices {
   participantName: string;
   isMicEnabled: boolean;
   isCamEnabled: boolean;
+  facingMode?: "user" | "environment";
 }
 
 interface PreJoinScreenProps {
@@ -46,6 +48,7 @@ export default function PreJoinScreen({
   const [participantName, setParticipantName] = useState(initialParticipantName);
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isCamEnabled, setIsCamEnabled] = useState(true);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
@@ -78,11 +81,19 @@ export default function PreJoinScreen({
 
   const stopAllTracks = useCallback(() => {
     if (videoTrackRef.current) {
-      videoTrackRef.current.stop();
+      try {
+        videoTrackRef.current.stop();
+      } catch {
+        // ignore
+      }
       videoTrackRef.current = null;
     }
     if (audioTrackRef.current) {
-      audioTrackRef.current.stop();
+      try {
+        audioTrackRef.current.stop();
+      } catch {
+        // ignore
+      }
       audioTrackRef.current = null;
     }
     if (animFrameRef.current) {
@@ -93,9 +104,12 @@ export default function PreJoinScreen({
       audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
     }
+    if (videoContainerRef.current) {
+      videoContainerRef.current.innerHTML = "";
+    }
   }, []);
 
-  // Video track lifecycle effect
+  // Video track lifecycle effect with portrait mobile sensor fallback
   useEffect(() => {
     let isCancelled = false;
 
@@ -115,9 +129,23 @@ export default function PreJoinScreen({
         if (videoTrackRef.current) {
           videoTrackRef.current.stop();
         }
-        const videoTrack = await createLocalVideoTrack({
-          resolution: { width: 640, height: 480, frameRate: 30 },
-        });
+
+        // Try ideal constraints first, fallback to basic facingMode for restrictive mobile sensors
+        let videoTrack: LocalVideoTrack;
+        try {
+          videoTrack = await createLocalVideoTrack({
+            facingMode,
+            resolution: {
+              width: 640,
+              height: 480,
+              frameRate: 30,
+            },
+          });
+        } catch {
+          videoTrack = await createLocalVideoTrack({
+            facingMode,
+          });
+        }
 
         if (isCancelled) {
           videoTrack.stop();
@@ -129,14 +157,16 @@ export default function PreJoinScreen({
         if (videoContainerRef.current) {
           videoContainerRef.current.innerHTML = "";
           const el = videoTrack.attach();
-          el.className = "w-full h-full object-cover -scale-x-100 rounded-xl sm:rounded-2xl";
+          el.className = `w-full h-full object-cover rounded-xl sm:rounded-2xl ${
+            facingMode === "user" ? "-scale-x-100" : ""
+          }`;
           videoContainerRef.current.appendChild(el);
         }
+        setMediaError(null);
       } catch (err: unknown) {
         if (!isCancelled) {
           console.warn("Camera access warning:", err);
-          setIsCamEnabled(false);
-          setMediaError("Camera permission denied. Joining with audio.");
+          setMediaError("Camera permission blocked. Tap allow or join with mic only.");
         }
       }
     }
@@ -146,7 +176,7 @@ export default function PreJoinScreen({
     return () => {
       isCancelled = true;
     };
-  }, [isCamEnabled]);
+  }, [isCamEnabled, facingMode]);
 
   // Audio track lifecycle effect
   useEffect(() => {
@@ -249,6 +279,7 @@ export default function PreJoinScreen({
       participantName: cleanName,
       isMicEnabled,
       isCamEnabled,
+      facingMode,
     });
   };
 
@@ -387,6 +418,25 @@ export default function PreJoinScreen({
                   ) : (
                     <VideoOff className="w-5 h-5 text-white" />
                   )}
+                </button>
+
+                {/* Flip Camera (Front / Rear) */}
+                <button
+                  type="button"
+                  id="prejoin-flip-cam"
+                  onClick={() => {
+                    navigator.vibrate?.(40);
+                    setFacingMode((f) => (f === "user" ? "environment" : "user"));
+                  }}
+                  disabled={!isCamEnabled}
+                  title="Switch Camera (Front / Back)"
+                  className={`w-11 h-11 sm:w-12 sm:h-12 rounded-full transition-all flex items-center justify-center cursor-pointer shadow-lg active:scale-95 ${
+                    !isCamEnabled
+                      ? "opacity-40 cursor-not-allowed bg-slate-800/40 text-slate-600"
+                      : "bg-slate-800/90 hover:bg-slate-700 text-slate-200 backdrop-blur-md border border-slate-700"
+                  }`}
+                >
+                  <SwitchCamera className="w-5 h-5" />
                 </button>
               </div>
             </div>
