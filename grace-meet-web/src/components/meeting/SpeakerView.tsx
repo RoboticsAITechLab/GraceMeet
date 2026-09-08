@@ -57,9 +57,8 @@ export default function SpeakerView({ tracks }: SpeakerViewProps) {
       {otherTracks.length > 0 && (
         <div className="h-20 xs:h-24 sm:h-32 shrink-0 flex items-center gap-2 overflow-x-auto py-0.5 px-0.5">
           {otherTracks.map((track) => {
-            const key =
-              track.publication?.trackSid ||
-              `${track.participant.identity}-${track.source}`;
+            // Stable React key using participant identity + track source
+            const key = `${track.participant.identity}_${track.source}`;
 
             return (
               <div

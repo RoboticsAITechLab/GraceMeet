@@ -56,9 +56,9 @@ export default function ParticipantGrid({
       )}`}
     >
       {tracks.map((track) => {
-        const key =
-          track.publication?.trackSid ||
-          `${track.participant.identity}-${track.source}`;
+        // Stable React key using participant identity + track source
+        // NEVER use trackSid as it transitions from placeholder to live track, which unmounts the video element
+        const key = `${track.participant.identity}_${track.source}`;
         const isHandRaised = !!raisedHands[track.participant.identity];
 
         return (

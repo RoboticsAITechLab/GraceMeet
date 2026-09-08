@@ -82,6 +82,7 @@ export default function PreJoinScreen({
   const stopAllTracks = useCallback(() => {
     if (videoTrackRef.current) {
       try {
+        videoTrackRef.current.mediaStreamTrack?.stop();
         videoTrackRef.current.stop();
       } catch {
         // ignore
@@ -90,6 +91,7 @@ export default function PreJoinScreen({
     }
     if (audioTrackRef.current) {
       try {
+        audioTrackRef.current.mediaStreamTrack?.stop();
         audioTrackRef.current.stop();
       } catch {
         // ignore
@@ -116,6 +118,7 @@ export default function PreJoinScreen({
     async function setupVideo() {
       if (!isCamEnabled) {
         if (videoTrackRef.current) {
+          videoTrackRef.current.mediaStreamTrack?.stop();
           videoTrackRef.current.stop();
           videoTrackRef.current = null;
         }
@@ -127,7 +130,9 @@ export default function PreJoinScreen({
 
       try {
         if (videoTrackRef.current) {
+          videoTrackRef.current.mediaStreamTrack?.stop();
           videoTrackRef.current.stop();
+          videoTrackRef.current = null;
         }
 
         // Try ideal constraints first, fallback to basic facingMode for restrictive mobile sensors
@@ -185,6 +190,7 @@ export default function PreJoinScreen({
     async function setupAudio() {
       if (!isMicEnabled) {
         if (audioTrackRef.current) {
+          audioTrackRef.current.mediaStreamTrack?.stop();
           audioTrackRef.current.stop();
           audioTrackRef.current = null;
         }
@@ -197,7 +203,9 @@ export default function PreJoinScreen({
 
       try {
         if (audioTrackRef.current) {
+          audioTrackRef.current.mediaStreamTrack?.stop();
           audioTrackRef.current.stop();
+          audioTrackRef.current = null;
         }
         const audioTrack = await createLocalAudioTrack({
           echoCancellation: true,
