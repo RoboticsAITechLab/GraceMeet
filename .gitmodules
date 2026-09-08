@@ -1,0 +1,3 @@
+[submodule "grace-meet-livekit"]
+	path = grace-meet-livekit
+	url = https://github.com/RoboticsAITechLab/grace-meet-livekit.git
