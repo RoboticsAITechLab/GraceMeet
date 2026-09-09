@@ -184,55 +184,73 @@ export function useGraceMediaState(
   useEffect(() => {
     if (!room || initialAcquisitionDoneRef.current) return;
 
-    let isCancelled = false;
+    let isEffectActive = true;
 
     const runOrderedAcquisition = async () => {
-      if (initialAcquisitionDoneRef.current || isCancelled) return;
-      initialAcquisitionDoneRef.current = true;
+      if (initialAcquisitionDoneRef.current || !isEffectActive) return;
+      if (room.state !== ConnectionState.Connected) {
+        console.log("[GraceMeet][Media] Waiting for room connection before media acquisition...");
+        return;
+      }
 
+      initialAcquisitionDoneRef.current = true;
       console.log(
         `[GraceMeet][Media] Starting ordered acquisition -> Mic: ${initialMicEnabled ? "ON" : "OFF"}, Cam: ${initialCamEnabled ? "ON" : "OFF"}`
       );
+
+      // Brief 150ms buffer to allow browser camera/audio drivers to fully release pre-join preview tracks
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      if (!isEffectActive) return;
 
       // Step 1: Microphone acquired FIRST
       if (initialMicEnabled) {
         try {
           isMicPendingRef.current = true;
           setIsMicPending(true);
-          await room.localParticipant.setMicrophoneEnabled(true, {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          });
+          try {
+            await room.localParticipant.setMicrophoneEnabled(true, {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            });
+          } catch (micConstraintErr) {
+            console.warn("[GraceMeet][Media] Advanced mic constraints failed, retrying simple:", micConstraintErr);
+            await room.localParticipant.setMicrophoneEnabled(true);
+          }
           console.log("[GraceMeet][Media] Initial microphone published successfully");
         } catch (err: unknown) {
-          if (!isCancelled) {
-            const error = formatMediaError(err, "microphone");
-            console.warn("[GraceMeet][Media] Initial mic acquisition error:", error);
-            setMicError(error);
-          }
+          const error = formatMediaError(err, "microphone");
+          console.warn("[GraceMeet][Media] Initial mic acquisition error:", error);
+          setMicError(error);
         } finally {
           isMicPendingRef.current = false;
-          if (!isCancelled) setIsMicPending(false);
+          setIsMicPending(false);
         }
       }
 
-      // Step 2: Camera acquired SECOND (sequential to prevent mobile hardware sensor contention)
-      if (initialCamEnabled && !isCancelled) {
+      // Brief 150ms stagger between mic and cam to prevent mobile hardware sensor contention
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      if (!isEffectActive) return;
+
+      // Step 2: Camera acquired SECOND
+      if (initialCamEnabled) {
         try {
           isCameraPendingRef.current = true;
           setIsCameraPending(true);
-          await room.localParticipant.setCameraEnabled(true, { facingMode });
+          try {
+            await room.localParticipant.setCameraEnabled(true, { facingMode });
+          } catch (camConstraintErr) {
+            console.warn("[GraceMeet][Media] FacingMode camera constraints failed, retrying generic:", camConstraintErr);
+            await room.localParticipant.setCameraEnabled(true);
+          }
           console.log("[GraceMeet][Media] Initial camera published successfully");
         } catch (err: unknown) {
-          if (!isCancelled) {
-            const error = formatMediaError(err, "camera");
-            console.warn("[GraceMeet][Media] Initial camera acquisition error:", error);
-            setCameraError(error);
-          }
+          const error = formatMediaError(err, "camera");
+          console.warn("[GraceMeet][Media] Initial camera acquisition error:", error);
+          setCameraError(error);
         } finally {
           isCameraPendingRef.current = false;
-          if (!isCancelled) setIsCameraPending(false);
+          setIsCameraPending(false);
         }
       }
     };
@@ -240,18 +258,16 @@ export function useGraceMediaState(
     if (room.state === ConnectionState.Connected) {
       runOrderedAcquisition();
     } else {
-      room.once(RoomEvent.SignalConnected, runOrderedAcquisition);
       room.once(RoomEvent.Connected, runOrderedAcquisition);
     }
 
     return () => {
-      isCancelled = true;
-      room.off(RoomEvent.SignalConnected, runOrderedAcquisition);
+      isEffectActive = false;
       room.off(RoomEvent.Connected, runOrderedAcquisition);
     };
   }, [room, initialCamEnabled, initialMicEnabled, facingMode]);
 
-  // Robust Camera Toggle: directly modifies localParticipant, no stale boolean inversion
+  // Robust Camera Toggle: directly modifies localParticipant with generic fallback
   const toggleCamera = useCallback(async (): Promise<boolean> => {
     if (!localParticipant || isCameraPendingRef.current) {
       return isCameraEnabled;
@@ -268,7 +284,12 @@ export function useGraceMediaState(
 
     try {
       if (targetState) {
-        await localParticipant.setCameraEnabled(true, { facingMode });
+        try {
+          await localParticipant.setCameraEnabled(true, { facingMode });
+        } catch (constraintErr) {
+          console.warn("[GraceMeet][Media] FacingMode camera toggle failed, retrying generic:", constraintErr);
+          await localParticipant.setCameraEnabled(true);
+        }
       } else {
         await localParticipant.setCameraEnabled(false);
       }
@@ -284,7 +305,7 @@ export function useGraceMediaState(
     }
   }, [localParticipant, facingMode, isCameraEnabled]);
 
-  // Robust Microphone Toggle: directly modifies localParticipant, no stale boolean inversion
+  // Robust Microphone Toggle: directly modifies localParticipant with generic fallback
   const toggleMicrophone = useCallback(async (): Promise<boolean> => {
     if (!localParticipant || isMicPendingRef.current) {
       return isMicrophoneEnabled;
@@ -301,11 +322,16 @@ export function useGraceMediaState(
 
     try {
       if (targetState) {
-        await localParticipant.setMicrophoneEnabled(true, {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        });
+        try {
+          await localParticipant.setMicrophoneEnabled(true, {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          });
+        } catch (constraintErr) {
+          console.warn("[GraceMeet][Media] Advanced mic toggle failed, retrying generic:", constraintErr);
+          await localParticipant.setMicrophoneEnabled(true);
+        }
       } else {
         await localParticipant.setMicrophoneEnabled(false);
       }
