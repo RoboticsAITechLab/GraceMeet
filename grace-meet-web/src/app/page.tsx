@@ -1,18 +1,67 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { Video, Users, BookOpen, Shield, ArrowRight, Sparkles, HeartHandshake } from "lucide-react";
-import { generateMeetingId } from "@/lib/utils/meetingId";
+import { useState, useEffect, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Video,
+  Users,
+  BookOpen,
+  Shield,
+  ArrowRight,
+  Sparkles,
+  HeartHandshake,
+  Check,
+  Copy,
+  Share2,
+  RotateCcw,
+} from "lucide-react";
+import { formatInviteMessage } from "@/lib/utils/meetingId";
+
+interface CreatedMeetingData {
+  meetingId: string;
+  title: string;
+  url: string;
+}
 
 export default function HomePage() {
+  return (
+    <Suspense fallback={<div className="min-h-[100dvh] bg-[#090d16]" />}>
+      <HomeContent />
+    </Suspense>
+  );
+}
+
+function HomeContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Active view tab: 'create' | 'join'
+  const isCreateParam = searchParams.get("create") === "true";
+  const [activeTab, setActiveTab] = useState<"create" | "join">(isCreateParam ? "create" : "create");
+
+  // Participant / Host details
   const [participantName, setParticipantName] = useState("");
+  const [meetingTitle, setMeetingTitle] = useState("");
   const [meetingInput, setMeetingInput] = useState("");
+
+  // Submission & state handling
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [createdMeeting, setCreatedMeeting] = useState<CreatedMeetingData | null>(null);
 
-  // Restore saved participant name after mount asynchronously
+  // Copy & Share feedback
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [sharedNotice, setSharedNotice] = useState(false);
+
+  // Quick suggestions for church meeting titles
+  const SUGGESTED_TITLES = [
+    "Sunday Prayer",
+    "Bible Study",
+    "Cell Fellowship",
+    "Worship Practice",
+  ];
+
+  // Restore saved participant name after mount
   useEffect(() => {
     try {
       const savedName = localStorage.getItem("gracemeet_name");
@@ -34,27 +83,94 @@ export default function HomePage() {
     }
   };
 
-  const handleStartInstantMeeting = (e: React.FormEvent) => {
+  // Handle Meeting Creation Flow
+  const handleCreateMeeting = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!participantName.trim()) {
-      setErrorMsg("Please enter your name to start a meeting");
-      return;
-    }
     setErrorMsg("");
-    setIsSubmitting(true);
-    saveName(participantName.trim());
 
-    // Generate cryptographically unguessable meeting ID (e.g. fellowship-8f4k2m)
-    const newMeetingId = generateMeetingId("fellowship");
-    router.push(`/meeting/${encodeURIComponent(newMeetingId)}?name=${encodeURIComponent(participantName.trim())}`);
+    const titleToUse = meetingTitle.trim() || "Sunday Fellowship";
+    setIsSubmitting(true);
+
+    if (participantName.trim()) {
+      saveName(participantName.trim());
+    }
+
+    try {
+      const res = await fetch("/api/meetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: titleToUse,
+          hostName: participantName.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to create meeting");
+      }
+
+      // Transition to Meeting Created View
+      setCreatedMeeting({
+        meetingId: data.meeting.meetingId,
+        title: data.meeting.title,
+        url: data.url,
+      });
+    } catch (err: unknown) {
+      console.error("[GraceMeet] Create meeting error:", err);
+      setErrorMsg(err instanceof Error ? err.message : "Error creating meeting");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
+  // Handle Start Meeting (navigation from Meeting Created screen)
+  const handleStartMeeting = () => {
+    if (!createdMeeting) return;
+    const nameParam = participantName.trim() ? `?name=${encodeURIComponent(participantName.trim())}` : "";
+    router.push(`/meeting/${encodeURIComponent(createdMeeting.meetingId)}${nameParam}`);
+  };
+
+  // Handle Copy Link
+  const handleCopyLink = async () => {
+    if (!createdMeeting) return;
+    try {
+      await navigator.clipboard.writeText(createdMeeting.url);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
+  };
+
+  // Handle Share (Web Share API with fallback)
+  const handleShare = async () => {
+    if (!createdMeeting) return;
+    const inviteText = formatInviteMessage(createdMeeting.meetingId, createdMeeting.title);
+
+    if (typeof navigator !== "undefined" && navigator.share) {
+      try {
+        await navigator.share({
+          title: `GraceMeet: ${createdMeeting.title}`,
+          text: inviteText,
+          url: createdMeeting.url,
+        });
+        setSharedNotice(true);
+        setTimeout(() => setSharedNotice(false), 2000);
+      } catch (err: unknown) {
+        if ((err as Error)?.name !== "AbortError") {
+          handleCopyLink();
+        }
+      }
+    } else {
+      // Fallback: Copy to clipboard
+      handleCopyLink();
+    }
+  };
+
+  // Handle Guest Joining Existing Meeting
   const handleJoinMeeting = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!participantName.trim()) {
-      setErrorMsg("Please enter your name to join");
-      return;
-    }
     if (!meetingInput.trim()) {
       setErrorMsg("Please enter a meeting code or paste invite link");
       return;
@@ -71,14 +187,18 @@ export default function HomePage() {
 
     const idRegex = /^[a-zA-Z0-9_-]+$/;
     if (!idRegex.test(cleanId) || cleanId.length < 3) {
-      setErrorMsg("Invalid meeting code or link");
+      setErrorMsg("Invalid meeting code or link format");
       return;
     }
 
     setErrorMsg("");
     setIsSubmitting(true);
-    saveName(participantName.trim());
-    router.push(`/meeting/${encodeURIComponent(cleanId)}?name=${encodeURIComponent(participantName.trim())}`);
+    if (participantName.trim()) {
+      saveName(participantName.trim());
+    }
+
+    const nameParam = participantName.trim() ? `?name=${encodeURIComponent(participantName.trim())}` : "";
+    router.push(`/meeting/${encodeURIComponent(cleanId)}${nameParam}`);
   };
 
   return (
@@ -125,7 +245,7 @@ export default function HomePage() {
           </h1>
 
           <p className="text-xs sm:text-base text-slate-400 max-w-lg mx-auto leading-relaxed">
-            One-tap shareable meeting links crafted for prayer groups, church ministries, and Bible studies.
+            Permanent, reusable meeting links crafted for church congregations, prayer groups, and Bible studies.
           </p>
         </div>
 
@@ -140,86 +260,255 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* Participant Name Input */}
-          <div className="mb-4 sm:mb-5">
-            <label className="block text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
-              Your Name <span className="text-amber-400">*</span>
-            </label>
-            <input
-              type="text"
-              id="participant-name-input"
-              value={participantName}
-              onChange={(e) => {
-                setParticipantName(e.target.value);
-                if (errorMsg) setErrorMsg("");
-              }}
-              placeholder="e.g. Pastor David, Sarah"
-              className="w-full h-11 sm:h-12 px-3.5 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 text-sm transition"
-              maxLength={64}
-              disabled={isSubmitting}
-            />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 pt-2 border-t border-slate-800/70">
-            {/* Primary Action: Instant Meeting */}
-            <div className="flex flex-col justify-between p-3.5 sm:p-4 rounded-xl bg-gradient-to-b from-indigo-950/40 to-slate-950 border border-indigo-900/40 hover:border-indigo-700/60 transition">
-              <div>
-                <div className="h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mb-2">
-                  <Video className="w-4 h-4 text-indigo-400" />
+          {/* STATE 1: Meeting Created Screen */}
+          {createdMeeting ? (
+            <div className="space-y-4 animate-in fade-in zoom-in-95 duration-200">
+              <div className="text-center pb-2">
+                <div className="h-12 w-12 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto mb-2">
+                  <Check className="w-6 h-6" />
                 </div>
-                <h2 className="text-xs sm:text-sm font-semibold text-white">Start a Meeting</h2>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  Generate unique shareable link.
+                <div className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full mb-1">
+                  Meeting Created
+                </div>
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight">
+                  {createdMeeting.title}
+                </h2>
+                <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
+                  Your permanent meeting link is ready. Share it anytime with participants.
                 </p>
               </div>
 
-              <button
-                type="button"
-                id="btn-start-meeting"
-                onClick={handleStartInstantMeeting}
-                disabled={isSubmitting}
-                className="mt-3 w-full h-11 rounded-lg bg-indigo-600 hover:bg-indigo-500 active:scale-98 text-white font-medium text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-indigo-600/20 transition disabled:opacity-60 cursor-pointer"
-              >
-                <span>Start Meeting</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            {/* Secondary Action: Join with Code or Link */}
-            <div className="flex flex-col justify-between p-3.5 sm:p-4 rounded-xl bg-slate-950 border border-slate-800/80 hover:border-slate-700 transition">
-              <div>
-                <div className="h-8 w-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-2">
-                  <Users className="w-4 h-4 text-amber-400" />
+              {/* Permanent URL Display Box */}
+              <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span className="font-semibold uppercase tracking-wider text-[10px] text-slate-400">
+                    Permanent Link
+                  </span>
+                  <span className="text-[10px] text-amber-400/80 font-mono">
+                    ID: {createdMeeting.meetingId}
+                  </span>
                 </div>
-                <h2 className="text-xs sm:text-sm font-semibold text-white">Join Meeting</h2>
-                <div className="mt-1.5">
-                  <input
-                    type="text"
-                    id="meeting-code-input"
-                    value={meetingInput}
-                    onChange={(e) => {
-                      setMeetingInput(e.target.value);
-                      if (errorMsg) setErrorMsg("");
-                    }}
-                    placeholder="Enter code or paste link"
-                    className="w-full h-9 px-2.5 bg-slate-900 border border-slate-800 rounded-lg text-white placeholder-slate-600 text-xs focus:outline-none focus:border-amber-500"
-                    disabled={isSubmitting}
-                  />
+                <div className="flex items-center gap-2">
+                  <span className="text-xs sm:text-sm font-mono text-amber-300 truncate select-all flex-1">
+                    {createdMeeting.url}
+                  </span>
                 </div>
               </div>
 
+              {/* Action Buttons: Copy Link & Share */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleCopyLink}
+                  className={`h-11 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition active:scale-95 cursor-pointer ${
+                    copiedLink
+                      ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
+                      : "bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700"
+                  }`}
+                >
+                  {copiedLink ? (
+                    <>
+                      <Check className="w-4 h-4 text-white" />
+                      <span>Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4 text-slate-400" />
+                      <span>Copy Link</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleShare}
+                  className="h-11 px-3 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold flex items-center justify-center gap-2 transition active:scale-95 cursor-pointer"
+                >
+                  <Share2 className="w-4 h-4" />
+                  <span>{sharedNotice ? "Shared!" : "Share"}</span>
+                </button>
+              </div>
+
+              {/* Primary Action: Start Meeting */}
               <button
                 type="button"
-                id="btn-join-meeting"
-                onClick={handleJoinMeeting}
-                disabled={isSubmitting}
-                className="mt-3 w-full h-11 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-98 text-slate-200 font-medium text-xs flex items-center justify-center gap-1.5 border border-slate-700/60 transition disabled:opacity-60 cursor-pointer"
+                id="btn-start-created-meeting"
+                onClick={handleStartMeeting}
+                className="w-full h-12 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 active:scale-98 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition cursor-pointer"
               >
-                <span>Join Meeting</span>
-                <ArrowRight className="w-3.5 h-3.5" />
+                <span>Start Meeting</span>
+                <ArrowRight className="w-4 h-4" />
               </button>
+
+              {/* Reset to create another meeting */}
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatedMeeting(null);
+                    setMeetingTitle("");
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-white transition flex items-center justify-center gap-1 mx-auto cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Create another meeting</span>
+                </button>
+              </div>
             </div>
-          </div>
+          ) : (
+            /* STATE 2: Tabs (Create Meeting / Join Meeting) */
+            <div>
+              {/* Tab Selector */}
+              <div className="flex rounded-xl bg-slate-950 p-1 mb-5 border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("create");
+                    setErrorMsg("");
+                  }}
+                  className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                    activeTab === "create"
+                      ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Video className="w-3.5 h-3.5" />
+                  <span>Create Meeting</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("join");
+                    setErrorMsg("");
+                  }}
+                  className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                    activeTab === "join"
+                      ? "bg-slate-800 text-white shadow-md"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Join Meeting</span>
+                </button>
+              </div>
+
+              {/* Participant / Host Name Input (Common to both) */}
+              <div className="mb-4">
+                <label className="block text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Your Name <span className="text-amber-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  id="participant-name-input"
+                  value={participantName}
+                  onChange={(e) => {
+                    setParticipantName(e.target.value);
+                    if (errorMsg) setErrorMsg("");
+                  }}
+                  placeholder="e.g. Pastor David, Sarah"
+                  className="w-full h-11 sm:h-12 px-3.5 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 text-sm transition"
+                  maxLength={64}
+                  disabled={isSubmitting}
+                />
+              </div>
+
+              {/* TAB 1: CREATE MEETING */}
+              {activeTab === "create" && (
+                <form onSubmit={handleCreateMeeting} className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                      Meeting Title
+                    </label>
+                    <input
+                      type="text"
+                      id="meeting-title-input"
+                      value={meetingTitle}
+                      onChange={(e) => setMeetingTitle(e.target.value)}
+                      placeholder="e.g. Sunday Prayer"
+                      className="w-full h-11 sm:h-12 px-3.5 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 text-sm transition"
+                      maxLength={80}
+                      disabled={isSubmitting}
+                    />
+
+                    {/* Church-appropriate quick suggestions */}
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {SUGGESTED_TITLES.map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => setMeetingTitle(t)}
+                          className={`text-[10px] px-2 py-0.5 rounded-full border transition cursor-pointer ${
+                            meetingTitle === t
+                              ? "bg-amber-500/20 border-amber-500 text-amber-300"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-tight">
+                    Generates a permanent link that can be reused for future gatherings.
+                  </p>
+
+                  <button
+                    type="submit"
+                    id="btn-create-meeting"
+                    disabled={isSubmitting}
+                    className="w-full h-12 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-98 text-white font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 transition disabled:opacity-60 cursor-pointer"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <Sparkles className="w-4 h-4 animate-spin" />
+                        <span>Creating Meeting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Create Meeting</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+
+              {/* TAB 2: JOIN MEETING */}
+              {activeTab === "join" && (
+                <form onSubmit={handleJoinMeeting} className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                      Meeting Link or Code <span className="text-amber-400">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      id="meeting-code-input"
+                      value={meetingInput}
+                      onChange={(e) => {
+                        setMeetingInput(e.target.value);
+                        if (errorMsg) setErrorMsg("");
+                      }}
+                      placeholder="e.g. grace-7xk92m or paste full link"
+                      className="w-full h-11 sm:h-12 px-3.5 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 text-sm font-mono transition"
+                      disabled={isSubmitting}
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    id="btn-join-meeting"
+                    disabled={isSubmitting}
+                    className="w-full h-12 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-98 text-slate-100 font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 border border-slate-700 transition disabled:opacity-60 cursor-pointer"
+                  >
+                    <span>Join Meeting</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </form>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Feature Badges */}
@@ -229,9 +518,9 @@ export default function HomePage() {
               <HeartHandshake className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-xs font-semibold text-white">One-Tap Invite</h3>
+              <h3 className="text-xs font-semibold text-white">Permanent Link</h3>
               <p className="text-[11px] text-slate-400 leading-tight mt-0.5 hidden xs:block">
-                Share directly to WhatsApp & Telegram.
+                Reuse the same link weekly for cell groups and prayer calls.
               </p>
             </div>
           </div>
@@ -243,7 +532,7 @@ export default function HomePage() {
             <div>
               <h3 className="text-xs font-semibold text-white">Scripture Teaching</h3>
               <p className="text-[11px] text-slate-400 leading-tight mt-0.5 hidden xs:block">
-                Screen sharing for Bible study classes.
+                HD screen sharing for Bible study and sermon classes.
               </p>
             </div>
           </div>
@@ -253,9 +542,9 @@ export default function HomePage() {
               <Shield className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-xs font-semibold text-white">Private & Self-Hosted</h3>
+              <h3 className="text-xs font-semibold text-white">Private & Dedicated</h3>
               <p className="text-[11px] text-slate-400 leading-tight mt-0.5 hidden xs:block">
-                Local LiveKit media server routing.
+                Self-hosted LiveKit SFU WebRTC routing.
               </p>
             </div>
           </div>

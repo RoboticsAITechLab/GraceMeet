@@ -1,6 +1,7 @@
 import { AccessToken } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
+import { meetingStore } from "@/lib/server/meetingStore";
 
 export async function POST(req: NextRequest) {
   try {
@@ -20,7 +21,7 @@ export async function POST(req: NextRequest) {
       typeof clientIdentity === "string" ? clientIdentity.trim() : undefined
     );
   } catch (err: unknown) {
-    console.error("Error generating LiveKit token:", err);
+    console.error("[GraceMeet][Token] Error generating LiveKit token:", err);
     return NextResponse.json(
       { error: "Invalid request body or server error" },
       { status: 400 }
@@ -54,7 +55,7 @@ export async function GET(req: NextRequest) {
       clientIdentity ? clientIdentity.trim() : undefined
     );
   } catch (err: unknown) {
-    console.error("Error generating LiveKit token:", err);
+    console.error("[GraceMeet][Token] Server error processing token request:", err);
     return NextResponse.json(
       { error: "Server error processing token request" },
       { status: 500 }
@@ -116,22 +117,39 @@ async function generateTokenResponse(
   participantName: string,
   clientIdentity?: string
 ) {
+  // Step 1: Verify the GraceMeet meeting exists and is active in persistent store
+  const meeting = await meetingStore.getMeeting(meetingId);
+  if (!meeting) {
+    return NextResponse.json(
+      { error: "Meeting not found. Please verify the meeting link or create a new meeting." },
+      { status: 404 }
+    );
+  }
+
+  if (meeting.status === "disabled") {
+    return NextResponse.json(
+      { error: "This meeting is currently disabled or unavailable." },
+      { status: 403 }
+    );
+  }
+
+  // Step 2: Validate server media credentials
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   const livekitUrl = process.env.LIVEKIT_URL || "ws://localhost:7880";
 
   if (!apiKey || !apiSecret) {
-    console.error("Missing LIVEKIT_API_KEY or LIVEKIT_API_SECRET in environment variables");
+    console.error("[GraceMeet][Token] Missing LIVEKIT_API_KEY or LIVEKIT_API_SECRET in environment variables");
     return NextResponse.json(
       { error: "Server media credentials not configured" },
       { status: 500 }
     );
   }
 
-  // LiveKit Room mapping: GraceMeet meetingId maps directly to the underlying media room
-  const livekitRoomName = meetingId;
+  // Step 3: Deterministic server-side mapping: GraceMeet meetingId -> LiveKit Room
+  const livekitRoomName = `gracemeet:${meeting.meetingId}`;
 
-  // Use client-provided stable session identity if available, otherwise generate a deterministic fallback
+  // Step 4: Preserve Phase 3 stable session identity
   let participantIdentity: string;
   if (clientIdentity && clientIdentity.length >= 3) {
     participantIdentity = clientIdentity;
@@ -162,8 +180,7 @@ async function generateTokenResponse(
   return NextResponse.json({
     token,
     url: livekitUrl,
-    meetingId,
+    meetingId: meeting.meetingId,
     participantIdentity,
   });
 }
-

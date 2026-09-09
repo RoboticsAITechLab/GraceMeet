@@ -6,18 +6,19 @@ import { getMeetingUrl, formatInviteMessage } from "@/lib/utils/meetingId";
 
 interface ShareInviteProps {
   meetingId: string;
+  meetingTitle?: string;
   isOpen: boolean;
   onClose: () => void;
 }
 
-export default function ShareInvite({ meetingId, isOpen, onClose }: ShareInviteProps) {
+export default function ShareInvite({ meetingId, meetingTitle, isOpen, onClose }: ShareInviteProps) {
   const [copied, setCopied] = useState(false);
   const [shareSuccess, setShareSuccess] = useState(false);
 
   if (!isOpen) return null;
 
   const meetingUrl = getMeetingUrl(meetingId);
-  const inviteMessage = formatInviteMessage(meetingId);
+  const inviteMessage = formatInviteMessage(meetingId, meetingTitle);
 
   const handleCopyLink = async () => {
     try {

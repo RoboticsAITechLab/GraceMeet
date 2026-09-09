@@ -33,6 +33,7 @@ export interface PreJoinChoices {
 
 interface PreJoinScreenProps {
   meetingId: string;
+  meetingTitle?: string;
   initialParticipantName?: string;
   onJoin: (choices: PreJoinChoices) => void;
   isConnecting?: boolean;
@@ -40,6 +41,7 @@ interface PreJoinScreenProps {
 
 export default function PreJoinScreen({
   meetingId,
+  meetingTitle,
   initialParticipantName = "",
   onJoin,
   isConnecting = false,
@@ -454,11 +456,14 @@ export default function PreJoinScreen({
           <div className="w-full lg:col-span-5 flex flex-col">
             <div className="bg-slate-900/95 border border-slate-800 rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-xl backdrop-blur-xl">
               <div className="mb-3">
-                <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight">
-                  Fellowship Ready
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] font-semibold uppercase tracking-wider mb-1">
+                  <span>GraceMeet Fellowship</span>
+                </div>
+                <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight truncate">
+                  {meetingTitle || "Fellowship Ready"}
                 </h1>
                 <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
-                  Confirm your name and invite participants
+                  Confirm your name and media devices before entering
                 </p>
               </div>
 
@@ -591,6 +596,7 @@ export default function PreJoinScreen({
       {/* Share Invite Modal / Bottom Sheet */}
       <ShareInvite
         meetingId={meetingId}
+        meetingTitle={meetingTitle}
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
       />

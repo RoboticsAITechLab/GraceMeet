@@ -16,6 +16,7 @@ export type LayoutMode = "grid" | "speaker";
 
 interface MeetingHeaderProps {
   meetingId: string;
+  meetingTitle?: string;
   participantCount: number;
   connectionState: ConnectionState;
   layoutMode: LayoutMode;
@@ -24,6 +25,7 @@ interface MeetingHeaderProps {
 
 export default function MeetingHeader({
   meetingId,
+  meetingTitle,
   participantCount,
   connectionState,
   layoutMode,
@@ -50,16 +52,21 @@ export default function MeetingHeader({
   return (
     <>
       <header className="h-12 sm:h-14 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur-md px-2.5 sm:px-6 flex items-center justify-between z-20 shrink-0 pt-safe">
-        {/* Left: Brand + Room Code */}
+        {/* Left: Brand + Title / Room Code */}
         <div className="flex items-center gap-2">
           <div className="h-7 w-7 rounded-lg bg-gradient-to-br from-amber-500 to-indigo-600 flex items-center justify-center shadow-sm shrink-0">
             <span className="text-white font-bold text-xs">✝</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="font-bold text-xs text-white tracking-tight hidden md:inline">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="font-bold text-xs text-white tracking-tight hidden sm:inline shrink-0">
               GraceMeet
             </span>
-            <span className="text-[10px] sm:text-[11px] text-amber-400 font-mono bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 font-medium truncate max-w-[90px] xs:max-w-[130px] sm:max-w-[200px]">
+            {meetingTitle && (
+              <span className="text-xs text-slate-300 font-medium truncate max-w-[100px] xs:max-w-[140px] sm:max-w-[200px] hidden xs:inline">
+                · {meetingTitle}
+              </span>
+            )}
+            <span className="text-[10px] sm:text-[11px] text-amber-400 font-mono bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 font-medium truncate max-w-[90px] xs:max-w-[120px] sm:max-w-[160px] shrink-0">
               {meetingId}
             </span>
           </div>
@@ -130,6 +137,7 @@ export default function MeetingHeader({
       {/* Share Invite Modal / Bottom Sheet */}
       <ShareInvite
         meetingId={meetingId}
+        meetingTitle={meetingTitle}
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
       />

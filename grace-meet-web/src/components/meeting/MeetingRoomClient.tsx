@@ -35,6 +35,7 @@ import { useGraceMediaState } from "@/lib/hooks/useGraceMediaState";
 interface MeetingRoomClientProps {
   meetingId?: string;
   roomName?: string;
+  meetingTitle?: string;
   initialParticipantName?: string;
 }
 
@@ -79,6 +80,7 @@ function getOrCreateSessionIdentity(meetingId: string, participantName: string):
 export default function MeetingRoomClient({
   meetingId: propMeetingId,
   roomName: propRoomName,
+  meetingTitle,
   initialParticipantName = "",
 }: MeetingRoomClientProps) {
   const router = useRouter();
@@ -275,6 +277,7 @@ export default function MeetingRoomClient({
     return (
       <PreJoinScreen
         meetingId={meetingId}
+        meetingTitle={meetingTitle}
         initialParticipantName={userChoices.participantName}
         onJoin={handlePreJoinSubmit}
         isConnecting={isConnecting}
@@ -326,6 +329,7 @@ export default function MeetingRoomClient({
       <RoomAudioRenderer />
       <MeetingContent
         meetingId={meetingId}
+        meetingTitle={meetingTitle}
         onLeave={handleLeave}
         userChoices={userChoices}
         isUnexpectedlyDisconnected={isUnexpectedlyDisconnected}
@@ -339,6 +343,7 @@ export default function MeetingRoomClient({
 // Inner Meeting Content executing within the LiveKitRoom context
 function MeetingContent({
   meetingId,
+  meetingTitle,
   onLeave,
   userChoices,
   isUnexpectedlyDisconnected,
@@ -346,6 +351,7 @@ function MeetingContent({
   onManualReconnect,
 }: {
   meetingId: string;
+  meetingTitle?: string;
   onLeave: () => void;
   userChoices: PreJoinChoices;
   isUnexpectedlyDisconnected: boolean;
@@ -532,6 +538,7 @@ function MeetingContent({
       {/* Top Mobile Header */}
       <MeetingHeader
         meetingId={meetingId}
+        meetingTitle={meetingTitle}
         participantCount={participants.length}
         connectionState={connectionState}
         layoutMode={layoutMode}
@@ -563,6 +570,7 @@ function MeetingContent({
       {isShareModalOpen && (
         <ShareInvite
           meetingId={meetingId}
+          meetingTitle={meetingTitle}
           isOpen={isShareModalOpen}
           onClose={() => setIsShareModalOpen(false)}
         />
