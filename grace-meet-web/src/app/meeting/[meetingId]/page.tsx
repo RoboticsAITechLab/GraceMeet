@@ -5,7 +5,7 @@ import { meetingStore, isValidMeetingIdFormat } from "@/lib/server/meetingStore"
 
 interface MeetingPageProps {
   params: Promise<{ meetingId: string }>;
-  searchParams: Promise<{ name?: string }>;
+  searchParams: Promise<{ name?: string; title?: string }>;
 }
 
 export default async function MeetingPage({
@@ -17,14 +17,15 @@ export default async function MeetingPage({
 
   const rawMeetingId = resolvedParams.meetingId?.trim() || "";
   const initialName = resolvedSearchParams.name?.trim() || "";
+  const titleHint = resolvedSearchParams.title?.trim() || undefined;
 
   // 1. Format validation
   if (!isValidMeetingIdFormat(rawMeetingId)) {
     return <MeetingNotFoundView reason="invalid_format" />;
   }
 
-  // 2. Persistent meeting record lookup
-  const meeting = await meetingStore.getMeeting(rawMeetingId);
+  // 2. Persistent meeting record lookup with optional title hint
+  const meeting = await meetingStore.getMeeting(rawMeetingId, titleHint);
 
   // 3. Handle nonexistent meeting
   if (!meeting) {

@@ -9,6 +9,7 @@ export async function POST(req: NextRequest) {
     const meetingId = body.meetingId || body.roomName;
     const participantName = body.participantName;
     const clientIdentity = body.participantIdentity || body.identity;
+    const titleHint = typeof body.title === "string" ? body.title : typeof body.meetingTitle === "string" ? body.meetingTitle : undefined;
 
     const validationError = validateInputs(meetingId, participantName, clientIdentity);
     if (validationError) {
@@ -18,7 +19,8 @@ export async function POST(req: NextRequest) {
     return await generateTokenResponse(
       meetingId.trim(),
       participantName.trim(),
-      typeof clientIdentity === "string" ? clientIdentity.trim() : undefined
+      typeof clientIdentity === "string" ? clientIdentity.trim() : undefined,
+      titleHint
     );
   } catch (err: unknown) {
     console.error("[GraceMeet][Token] Error generating LiveKit token:", err);
@@ -43,6 +45,7 @@ export async function GET(req: NextRequest) {
     const clientIdentity =
       searchParams.get("participantIdentity") ||
       searchParams.get("identity");
+    const titleHint = searchParams.get("title") || undefined;
 
     const validationError = validateInputs(meetingId, participantName, clientIdentity);
     if (validationError) {
@@ -52,7 +55,8 @@ export async function GET(req: NextRequest) {
     return await generateTokenResponse(
       meetingId!.trim(),
       participantName!.trim(),
-      clientIdentity ? clientIdentity.trim() : undefined
+      clientIdentity ? clientIdentity.trim() : undefined,
+      titleHint
     );
   } catch (err: unknown) {
     console.error("[GraceMeet][Token] Server error processing token request:", err);
@@ -115,10 +119,11 @@ function validateInputs(
 async function generateTokenResponse(
   meetingId: string,
   participantName: string,
-  clientIdentity?: string
+  clientIdentity?: string,
+  titleHint?: string
 ) {
   // Step 1: Verify the GraceMeet meeting exists and is active in persistent store
-  const meeting = await meetingStore.getMeeting(meetingId);
+  const meeting = await meetingStore.getMeeting(meetingId, titleHint);
   if (!meeting) {
     return NextResponse.json(
       { error: "Meeting not found. Please verify the meeting link or create a new meeting." },

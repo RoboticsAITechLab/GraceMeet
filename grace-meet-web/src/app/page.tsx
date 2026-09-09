@@ -127,8 +127,15 @@ function HomeContent() {
   // Handle Start Meeting (navigation from Meeting Created screen)
   const handleStartMeeting = () => {
     if (!createdMeeting) return;
-    const nameParam = participantName.trim() ? `?name=${encodeURIComponent(participantName.trim())}` : "";
-    router.push(`/meeting/${encodeURIComponent(createdMeeting.meetingId)}${nameParam}`);
+    const params = new URLSearchParams();
+    if (participantName.trim()) {
+      params.set("name", participantName.trim());
+    }
+    if (createdMeeting.title) {
+      params.set("title", createdMeeting.title);
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    router.push(`/meeting/${encodeURIComponent(createdMeeting.meetingId)}${query}`);
   };
 
   // Handle Copy Link

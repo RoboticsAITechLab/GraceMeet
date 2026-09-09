@@ -142,6 +142,7 @@ export default function MeetingRoomClient({
             meetingId,
             participantName: choices.participantName,
             participantIdentity: sessionIdentity,
+            meetingTitle,
           }),
         });
 
@@ -170,7 +171,7 @@ export default function MeetingRoomClient({
         setIsConnecting(false);
       }
     },
-    [meetingId]
+    [meetingId, meetingTitle]
   );
 
   const handleLeave = useCallback(() => {
@@ -253,6 +254,7 @@ export default function MeetingRoomClient({
             meetingId,
             participantName: userChoices.participantName,
             participantIdentity: stableIdentity,
+            meetingTitle,
           }),
         });
         const data = await res.json();
@@ -270,7 +272,7 @@ export default function MeetingRoomClient({
     } finally {
       setIsReconnectingManual(false);
     }
-  }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName, participantIdentity]);
+  }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName, participantIdentity, meetingTitle]);
 
   // If no token, present the mobile-first PreJoin screen
   if (!token) {
