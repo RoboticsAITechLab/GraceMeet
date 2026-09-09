@@ -439,8 +439,8 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">TURN Relay:</span>
-                    <span className={process.env.NEXT_PUBLIC_TURN_URL ? "text-emerald-400" : "text-amber-400/80"}>
-                      {process.env.NEXT_PUBLIC_TURN_URL ? "Enabled (Custom TURN)" : "Direct/STUN (TURN Optional)"}
+                    <span className="text-emerald-400">
+                      {process.env.NEXT_PUBLIC_TURN_URL ? "Enabled (Custom TURN)" : "Coturn Relay (Azure :3478)"}
                     </span>
                   </div>
                   {(lastCameraError || lastMicrophoneError) && (
