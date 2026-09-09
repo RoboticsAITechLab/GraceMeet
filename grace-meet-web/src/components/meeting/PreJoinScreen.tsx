@@ -37,6 +37,7 @@ interface PreJoinScreenProps {
   initialParticipantName?: string;
   onJoin: (choices: PreJoinChoices) => void;
   isConnecting?: boolean;
+  errorMessage?: string | null;
 }
 
 export default function PreJoinScreen({
@@ -45,6 +46,7 @@ export default function PreJoinScreen({
   initialParticipantName = "",
   onJoin,
   isConnecting = false,
+  errorMessage,
 }: PreJoinScreenProps) {
   const router = useRouter();
   const [participantName, setParticipantName] = useState(initialParticipantName);
@@ -545,6 +547,14 @@ export default function PreJoinScreen({
                     </span>
                   </button>
                 </div>
+
+                {/* Token or Connection Error Banner */}
+                {errorMessage && (
+                  <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{errorMessage}</span>
+                  </div>
+                )}
 
                 {/* Primary Join Action (Big 48px touch target) */}
                 <button

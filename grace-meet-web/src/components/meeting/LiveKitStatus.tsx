@@ -433,6 +433,16 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                       {typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getUserMedia === "function" ? "Available" : "Not Found"}
                     </span>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">ICE Candidates:</span>
+                    <span className="text-slate-300">Dual STUN (Cloudflare + Google)</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">TURN Relay:</span>
+                    <span className={process.env.NEXT_PUBLIC_TURN_URL ? "text-emerald-400" : "text-amber-400/80"}>
+                      {process.env.NEXT_PUBLIC_TURN_URL ? "Enabled (Custom TURN)" : "Direct/STUN (TURN Optional)"}
+                    </span>
+                  </div>
                   {(lastCameraError || lastMicrophoneError) && (
                     <div className="pt-1 text-[9px] text-rose-400 border-t border-slate-800">
                       {lastCameraError && <div>Cam Error: {lastCameraError.message}</div>}

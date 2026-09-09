@@ -20,8 +20,9 @@ import {
   DisconnectReason,
   RoomEvent,
   MediaDeviceFailure,
+  RoomConnectOptions,
 } from "livekit-client";
-import { RotateCw, WifiOff, AlertCircle } from "lucide-react";
+import { RotateCw, WifiOff } from "lucide-react";
 import PreJoinScreen, { PreJoinChoices } from "./PreJoinScreen";
 import MeetingHeader, { LayoutMode } from "./MeetingHeader";
 import MeetingControls from "./MeetingControls";
@@ -77,6 +78,45 @@ function getOrCreateSessionIdentity(meetingId: string, participantName: string):
   return newIdentity;
 }
 
+/**
+ * Production-ready ICE server configuration.
+ * Dual STUN providers (Cloudflare + Google) for server-reflexive candidate discovery,
+ * plus configurable TURN/TURNS relay fallback from environment variables for restrictive enterprise NAT/firewalls.
+ */
+function getIceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
+    {
+      urls: [
+        "stun:stun.cloudflare.com:3478",
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+      ],
+    },
+  ];
+
+  if (typeof window !== "undefined") {
+    const turnUrl =
+      process.env.NEXT_PUBLIC_TURN_URL ||
+      process.env.NEXT_PUBLIC_LIVEKIT_TURN_URL;
+    const turnUser =
+      process.env.NEXT_PUBLIC_TURN_USERNAME ||
+      process.env.NEXT_PUBLIC_LIVEKIT_TURN_USERNAME;
+    const turnPass =
+      process.env.NEXT_PUBLIC_TURN_CREDENTIAL ||
+      process.env.NEXT_PUBLIC_LIVEKIT_TURN_CREDENTIAL;
+
+    if (turnUrl) {
+      servers.push({
+        urls: turnUrl.split(",").map((u) => u.trim()),
+        username: turnUser || undefined,
+        credential: turnPass || undefined,
+      });
+    }
+  }
+
+  return servers;
+}
+
 export default function MeetingRoomClient({
   meetingId: propMeetingId,
   roomName: propRoomName,
@@ -120,9 +160,21 @@ export default function MeetingRoomClient({
         videoCodec: "vp8",
         dtx: true,
         red: true,
+        stopMicTrackOnMute: false,
       },
     });
   }, []);
+
+  // Production WebRTC connect options with dual STUN + configurable TURN servers
+  const connectOptions = useMemo<RoomConnectOptions>(
+    () => ({
+      autoSubscribe: true,
+      rtcConfig: {
+        iceServers: getIceServers(),
+      },
+    }),
+    []
+  );
 
   const handlePreJoinSubmit = useCallback(
     async (choices: PreJoinChoices) => {
@@ -210,8 +262,8 @@ export default function MeetingRoomClient({
   );
 
   const handleRoomError = useCallback((error: Error) => {
-    console.error("[GraceMeet][Room] Room error:", error);
-    setConnectionError(error.message || "Connection error with LiveKit server");
+    console.warn("[GraceMeet][Room] LiveKit room event notice:", error);
+    // Constraint 1: LiveKitRoom MUST remain mounted. Never set fatal connectionError that unmounts the room.
   }, []);
 
   // Reset unexpected disconnect state if room successfully reconnects
@@ -232,6 +284,17 @@ export default function MeetingRoomClient({
   // Manual reconnect handler when connection was lost and auto-reconnect exhausted
   const handleManualReconnect = useCallback(async () => {
     if (!token || !livekitUrl || isReconnectingManual) return;
+
+    // Constraint 2: Never call room.connect() while LiveKit is already CONNECTING or RECONNECTING
+    if (
+      room.state === ConnectionState.Connecting ||
+      room.state === ConnectionState.Reconnecting ||
+      room.state === ConnectionState.Connected
+    ) {
+      console.log("[GraceMeet][Reconnect] Room is already connecting/reconnecting/connected. State:", room.state);
+      return;
+    }
+
     setIsReconnectingManual(true);
     console.log("[GraceMeet][Reconnect] Attempting manual room reconnection...");
     try {
@@ -262,7 +325,7 @@ export default function MeetingRoomClient({
           setToken(data.token);
           setLivekitUrl(data.url);
           if (room.state === ConnectionState.Disconnected) {
-            await room.connect(data.url, data.token);
+            await room.connect(data.url, data.token, connectOptions);
           }
           setIsUnexpectedlyDisconnected(false);
         }
@@ -272,7 +335,7 @@ export default function MeetingRoomClient({
     } finally {
       setIsReconnectingManual(false);
     }
-  }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName, participantIdentity, meetingTitle]);
+  }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName, participantIdentity, meetingTitle, connectOptions]);
 
   // If no token, present the mobile-first PreJoin screen
   if (!token) {
@@ -283,55 +346,19 @@ export default function MeetingRoomClient({
         initialParticipantName={userChoices.participantName}
         onJoin={handlePreJoinSubmit}
         isConnecting={isConnecting}
+        errorMessage={connectionError}
       />
     );
   }
 
-  if (connectionError) {
-    return (
-      <div className="min-h-[100dvh] flex flex-col items-center justify-center bg-[#090d16] text-slate-100 p-4">
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-sm text-center shadow-2xl">
-          <div className="w-12 h-12 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-center justify-center mx-auto mb-3">
-            <AlertCircle className="w-6 h-6" />
-          </div>
-          <h2 className="text-base font-bold text-rose-400 mb-2">
-            Connection Error
-          </h2>
-          <p className="text-xs text-slate-400 mb-4">{connectionError}</p>
-          <button
-            type="button"
-            onClick={() => {
-              setToken(null);
-              setConnectionError(null);
-            }}
-            className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold cursor-pointer"
-          >
-            Back to Pre-Join
-          </button>
-        </div>
-      </div>
-    );
-  }
-
+  // Constraint 1: <LiveKitRoom> MUST remain mounted for the entire active meeting.
+  // Media errors must never render a branch that unmounts LiveKitRoom.
   return (
     <LiveKitRoom
       room={room}
-      video={
-        userChoices.isCamEnabled
-          ? {
-              facingMode: userChoices.facingMode || "user",
-            }
-          : false
-      }
-      audio={
-        userChoices.isMicEnabled
-          ? {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            }
-          : false
-      }
+      connectOptions={connectOptions}
+      video={false}
+      audio={false}
       token={token}
       serverUrl={livekitUrl || undefined}
       connect={true}
