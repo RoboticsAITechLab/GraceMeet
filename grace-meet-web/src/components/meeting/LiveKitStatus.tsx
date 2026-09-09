@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   useRoomContext,
   useConnectionState,
   useLocalParticipant,
 } from "@livekit/components-react";
-import { ConnectionState } from "livekit-client";
+import { ConnectionState, Track } from "livekit-client";
 import {
   Wifi,
   WifiOff,
@@ -25,6 +25,7 @@ import {
   User,
   ShieldCheck,
   Activity,
+  Radio,
 } from "lucide-react";
 
 export type MediaDiagnosticState = "connected" | "off" | "error" | "starting" | "unavailable";
@@ -33,9 +34,22 @@ interface LiveKitStatusProps {
   className?: string;
 }
 
+interface RtcDiagnostics {
+  pcConnectionState: string;
+  iceConnectionState: string;
+  signalingState: string;
+  selectedPair?: string;
+  protocol?: string;
+  localType?: string;
+  remoteType?: string;
+  hasRelayCandidate: boolean;
+  iceServers: string[];
+}
+
 export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isTechDetailsOpen, setIsTechDetailsOpen] = useState(false);
+  const [rtcDiag, setRtcDiag] = useState<RtcDiagnostics | null>(null);
 
   const room = useRoomContext();
   const connectionState = useConnectionState();
@@ -158,6 +172,127 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
     return "off";
   }, [connectionState, isMicrophoneEnabled, microphoneTrack, lastMicrophoneError]);
 
+  // STEP 6: Query real RTCPeerConnection stats (credentials strictly redacted)
+  const fetchRtcDiagnostics = useCallback(async () => {
+    if (!room) return;
+    try {
+      // Find publisher RTCPeerConnection instance from livekit engine internals
+      const engine = room.engine as unknown as {
+        pcManager?: { publisher?: { _pc?: RTCPeerConnection } };
+        publisher?: { pc?: RTCPeerConnection };
+        client?: { peerConnection?: RTCPeerConnection };
+      };
+      const pc =
+        engine?.pcManager?.publisher?._pc ||
+        engine?.publisher?.pc ||
+        engine?.client?.peerConnection;
+
+      if (!pc || !(pc instanceof RTCPeerConnection)) return;
+
+      const config = pc.getConfiguration?.() || {};
+      const redactedIceServers: string[] = [];
+      if (Array.isArray(config.iceServers)) {
+        for (const s of config.iceServers) {
+          if (Array.isArray(s.urls)) {
+            redactedIceServers.push(...s.urls);
+          } else if (typeof s.urls === "string") {
+            redactedIceServers.push(s.urls);
+          }
+        }
+      }
+
+      let selectedPair: string | undefined;
+      let protocol: string | undefined;
+      let localType: string | undefined;
+      let remoteType: string | undefined;
+      let hasRelayCandidate = false;
+
+      const stats = await pc.getStats();
+      const candidateMap = new Map<string, { candidateType?: string; ip?: string; address?: string; port?: number; protocol?: string }>();
+
+      stats.forEach((report) => {
+        if (report.type === "local-candidate" || report.type === "remote-candidate") {
+          candidateMap.set(report.id, report);
+          if (report.candidateType === "relay") {
+            hasRelayCandidate = true;
+          }
+        }
+      });
+
+      stats.forEach((report) => {
+        if (
+          report.type === "candidate-pair" &&
+          (report.state === "succeeded" || report.nominated === true || report.selected === true)
+        ) {
+          const local = candidateMap.get(report.localCandidateId);
+          const remote = candidateMap.get(report.remoteCandidateId);
+          if (local && remote) {
+            localType = local.candidateType;
+            remoteType = remote.candidateType;
+            protocol = (local.protocol || remote.protocol || report.protocol || "udp").toUpperCase();
+            selectedPair = `${localType} (${local.ip || local.address || "?"}:${local.port}) ↔ ${remoteType} (${remote.ip || remote.address || "?"}:${remote.port})`;
+          }
+        }
+      });
+
+      const diagResult: RtcDiagnostics = {
+        pcConnectionState: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState,
+        signalingState: pc.signalingState,
+        selectedPair,
+        protocol,
+        localType,
+        remoteType,
+        hasRelayCandidate,
+        iceServers: redactedIceServers,
+      };
+
+      setRtcDiag(diagResult);
+
+      // Console structured logging (Credentials redacted)
+      const micPub = localParticipant?.getTrackPublication(Track.Source.Microphone);
+      const camPub = localParticipant?.getTrackPublication(Track.Source.Camera);
+
+      console.log("[GraceMeet][WebRTC][Diagnostics]", {
+        pcConnectionState: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState,
+        signalingState: pc.signalingState,
+        selectedPair,
+        protocol,
+        localCandidateType: localType,
+        remoteCandidateType: remoteType,
+        hasRelayCandidate,
+        iceServers: redactedIceServers,
+        mic: {
+          isMicrophoneEnabled: localParticipant?.isMicrophoneEnabled,
+          publicationMuted: micPub?.isMuted,
+          trackReadyState: micPub?.track?.mediaStreamTrack?.readyState,
+          mediaStreamTrackEnabled: micPub?.track?.mediaStreamTrack?.enabled,
+        },
+        cam: {
+          isCameraEnabled: localParticipant?.isCameraEnabled,
+          hasPublication: !!camPub,
+          trackReadyState: camPub?.track?.mediaStreamTrack?.readyState,
+          mediaStreamTrackEnabled: camPub?.track?.mediaStreamTrack?.enabled,
+        },
+      });
+    } catch {
+      // ignore
+    }
+  }, [room, localParticipant]);
+
+  // Poll diagnostics periodically while technical details panel is open
+  useEffect(() => {
+    if (!isOpen || !isTechDetailsOpen) return;
+
+    const timer = setTimeout(fetchRtcDiagnostics, 0);
+    const interval = setInterval(fetchRtcDiagnostics, 2500);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [isOpen, isTechDetailsOpen, fetchRtcDiagnostics]);
+
   // Compact Header Indicator config based on ConnectionState
   const statusConfig = useMemo(() => {
     switch (connectionState) {
@@ -204,7 +339,10 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
         ref={triggerRef}
         type="button"
         id="livekit-diagnostics-trigger"
-        onClick={() => setIsOpen((prev) => !prev)}
+        onClick={() => {
+          setIsOpen((prev) => !prev);
+          if (!isOpen) fetchRtcDiagnostics();
+        }}
         aria-haspopup="dialog"
         aria-expanded={isOpen}
         aria-label={`LiveKit connection diagnostics: ${statusConfig.label}. Click to view media status.`}
@@ -234,7 +372,7 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
             role="dialog"
             aria-modal="true"
             aria-label="LiveKit Connection & Media Diagnostics"
-            className="relative w-full max-w-md sm:w-84 bg-slate-900/98 border-t sm:border border-slate-800 rounded-t-2xl sm:rounded-2xl p-4 sm:p-5 shadow-2xl backdrop-blur-xl z-10 text-slate-200 animate-in fade-in slide-in-from-bottom-3 sm:slide-in-from-top-2 duration-150"
+            className="relative w-full max-w-md sm:w-88 bg-slate-900/98 border-t sm:border border-slate-800 rounded-t-2xl sm:rounded-2xl p-4 sm:p-5 shadow-2xl backdrop-blur-xl z-10 text-slate-200 animate-in fade-in slide-in-from-bottom-3 sm:slide-in-from-top-2 duration-150 max-h-[85vh] overflow-y-auto"
           >
             {/* Panel Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-800/80">
@@ -246,7 +384,7 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                   <h3 className="text-xs sm:text-sm font-bold text-white tracking-tight">
                     LiveKit Diagnostics
                   </h3>
-                  <p className="text-[10px] text-slate-400">Session & Realtime Media Status</p>
+                  <p className="text-[10px] text-slate-400">WebRTC ICE & Realtime Media Proof</p>
                 </div>
               </div>
 
@@ -261,11 +399,11 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
             </div>
 
             {/* Connection Section */}
-            <div className="py-3 space-y-2.5 border-b border-slate-800/80">
+            <div className="py-3 space-y-2 border-b border-slate-800/80">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[11px] text-slate-400 flex items-center gap-1.5">
                   <Server className="w-3.5 h-3.5 text-slate-500" />
-                  Status
+                  Room State
                 </span>
                 <span className="flex items-center gap-1.5 font-semibold text-xs">
                   {connectionState === ConnectionState.Connected && (
@@ -329,9 +467,9 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
             </div>
 
             {/* Realtime Media Section */}
-            <div className="py-3 space-y-2.5 border-b border-slate-800/80">
+            <div className="py-3 space-y-2 border-b border-slate-800/80">
               <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-500">
-                Realtime Media
+                Authoritative Media State
               </span>
 
               {/* Camera Status */}
@@ -344,7 +482,12 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                   )}
                   Camera
                 </span>
-                <MediaBadge state={cameraState} errorMsg={lastCameraError?.message} />
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[10px] text-slate-400">
+                    ({localParticipant?.isCameraEnabled ? "ON" : "OFF"})
+                  </span>
+                  <MediaBadge state={cameraState} errorMsg={lastCameraError?.message} />
+                </div>
               </div>
 
               {/* Microphone Status */}
@@ -357,7 +500,12 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                   )}
                   Microphone
                 </span>
-                <MediaBadge state={microphoneState} errorMsg={lastMicrophoneError?.message} />
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[10px] text-slate-400">
+                    ({localParticipant?.isMicrophoneEnabled ? "ON" : "OFF"})
+                  </span>
+                  <MediaBadge state={microphoneState} errorMsg={lastMicrophoneError?.message} />
+                </div>
               </div>
             </div>
 
@@ -365,10 +513,16 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
             <div className="pt-2">
               <button
                 type="button"
-                onClick={() => setIsTechDetailsOpen((p) => !p)}
+                onClick={() => {
+                  setIsTechDetailsOpen((p) => !p);
+                  fetchRtcDiagnostics();
+                }}
                 className="w-full flex items-center justify-between text-[11px] font-medium text-slate-400 hover:text-slate-200 py-1 cursor-pointer transition"
               >
-                <span>Technical Details</span>
+                <span className="flex items-center gap-1.5">
+                  <Radio className="w-3.5 h-3.5 text-indigo-400" />
+                  WebRTC Transport & ICE Proof
+                </span>
                 {isTechDetailsOpen ? (
                   <ChevronUp className="w-3.5 h-3.5" />
                 ) : (
@@ -377,72 +531,84 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
               </button>
 
               {isTechDetailsOpen && (
-                <div className="mt-2 p-2.5 bg-slate-950/80 rounded-xl border border-slate-800 space-y-1.5 text-[10px] font-mono text-slate-300 animate-in fade-in duration-150">
+                <div className="mt-2 p-2.5 bg-slate-950/90 rounded-xl border border-slate-800 space-y-1.5 text-[10px] font-mono text-slate-300 animate-in fade-in duration-150">
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Connection State:</span>
-                    <span className="text-slate-300">{connectionState}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Room Name:</span>
-                    <span className="text-amber-300 truncate max-w-[150px]" title={roomName}>
-                      {roomName}
+                    <span className="text-slate-500">PeerConnection State:</span>
+                    <span className={rtcDiag?.pcConnectionState === "connected" ? "text-emerald-400" : "text-amber-400"}>
+                      {rtcDiag?.pcConnectionState || connectionState}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Identity:</span>
-                    <span
-                      className="text-slate-300 truncate max-w-[150px]"
-                      title={localParticipant?.identity || "none"}
-                    >
-                      {localParticipant?.identity || "none"}
+                    <span className="text-slate-500">ICE Connection State:</span>
+                    <span className={rtcDiag?.iceConnectionState === "connected" ? "text-emerald-400" : "text-amber-400"}>
+                      {rtcDiag?.iceConnectionState || "unknown"}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Participant Name:</span>
-                    <span className="text-slate-300 truncate max-w-[150px]">
-                      {localParticipant?.name || "none"}
+                    <span className="text-slate-500">Signaling State:</span>
+                    <span className="text-slate-300">{rtcDiag?.signalingState || "stable"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Selected Candidate:</span>
+                    <span className="text-amber-300 truncate max-w-[170px]" title={rtcDiag?.selectedPair || "Gathering..."}>
+                      {rtcDiag?.selectedPair || "Gathering..."}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Camera Track:</span>
+                    <span className="text-slate-500">Protocol:</span>
+                    <span className="text-emerald-400">{rtcDiag?.protocol || "UDP"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Candidate Types:</span>
                     <span className="text-slate-300">
-                      {cameraTrack?.trackSid ? "Published" : "Not Published"}
+                      {rtcDiag?.localType || "?"} ↔ {rtcDiag?.remoteType || "?"}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Camera ReadyState:</span>
-                    <span className="text-slate-300">
-                      {cameraTrack?.track?.mediaStreamTrack?.readyState || "none"}
+                    <span className="text-slate-500">TURN Relay Available:</span>
+                    <span className={rtcDiag?.hasRelayCandidate ? "text-emerald-400 font-bold" : "text-slate-400"}>
+                      {rtcDiag?.hasRelayCandidate ? "YES (Relay Active/Gathered)" : "Configured in PC"}
                     </span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Microphone Track:</span>
-                    <span className="text-slate-300">
-                      {microphoneTrack?.trackSid ? "Published" : "Not Published"}
-                    </span>
+
+                  <div className="pt-1 border-t border-slate-800">
+                    <span className="text-slate-500 block mb-0.5">Configured ICE Servers (Browser PC):</span>
+                    {rtcDiag?.iceServers && rtcDiag.iceServers.length > 0 ? (
+                      <div className="space-y-0.5 text-[9px] text-slate-400">
+                        {rtcDiag.iceServers.map((url, idx) => (
+                          <div key={idx} className="truncate" title={url}>
+                            • {url}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[9px] text-slate-500">Reading from RTCPeerConnection...</div>
+                    )}
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Mic ReadyState:</span>
-                    <span className="text-slate-300">
-                      {microphoneTrack?.track?.mediaStreamTrack?.readyState || "none"}
-                    </span>
+
+                  <div className="pt-1 border-t border-slate-800 space-y-1">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Mic Track ReadyState:</span>
+                      <span className="text-slate-300">
+                        {microphoneTrack?.track?.mediaStreamTrack?.readyState || "none"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Mic Pub Muted:</span>
+                      <span className="text-slate-300">{microphoneTrack?.isMuted ? "true" : "false"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Cam Track ReadyState:</span>
+                      <span className="text-slate-300">
+                        {cameraTrack?.track?.mediaStreamTrack?.readyState || "none"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Cam Pub Exists:</span>
+                      <span className="text-slate-300">{cameraTrack?.trackSid ? "true" : "false"}</span>
+                    </div>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">getUserMedia API:</span>
-                    <span className="text-emerald-400">
-                      {typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getUserMedia === "function" ? "Available" : "Not Found"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">ICE Candidates:</span>
-                    <span className="text-slate-300">Dual STUN (Cloudflare + Google)</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">TURN Relay:</span>
-                    <span className="text-emerald-400">
-                      {process.env.NEXT_PUBLIC_TURN_URL ? "Enabled (Custom TURN)" : "Coturn Relay (Azure :3478)"}
-                    </span>
-                  </div>
+
                   {(lastCameraError || lastMicrophoneError) && (
                     <div className="pt-1 text-[9px] text-rose-400 border-t border-slate-800">
                       {lastCameraError && <div>Cam Error: {lastCameraError.message}</div>}

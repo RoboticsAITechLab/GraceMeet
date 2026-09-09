@@ -78,45 +78,6 @@ function getOrCreateSessionIdentity(meetingId: string, participantName: string):
   return newIdentity;
 }
 
-/**
- * Production-ready ICE server configuration.
- * Dual STUN providers (Cloudflare + Google) for server-reflexive candidate discovery,
- * plus configurable TURN/TURNS relay fallback from environment variables for restrictive enterprise NAT/firewalls.
- */
-function getIceServers(): RTCIceServer[] {
-  const servers: RTCIceServer[] = [
-    {
-      urls: [
-        "stun:stun.cloudflare.com:3478",
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302",
-      ],
-    },
-  ];
-
-  if (typeof window !== "undefined") {
-    const turnUrl =
-      process.env.NEXT_PUBLIC_TURN_URL ||
-      process.env.NEXT_PUBLIC_LIVEKIT_TURN_URL;
-    const turnUser =
-      process.env.NEXT_PUBLIC_TURN_USERNAME ||
-      process.env.NEXT_PUBLIC_LIVEKIT_TURN_USERNAME;
-    const turnPass =
-      process.env.NEXT_PUBLIC_TURN_CREDENTIAL ||
-      process.env.NEXT_PUBLIC_LIVEKIT_TURN_CREDENTIAL;
-
-    if (turnUrl) {
-      servers.push({
-        urls: turnUrl.split(",").map((u) => u.trim()),
-        username: turnUser || undefined,
-        credential: turnPass || undefined,
-      });
-    }
-  }
-
-  return servers;
-}
-
 export default function MeetingRoomClient({
   meetingId: propMeetingId,
   roomName: propRoomName,
@@ -165,13 +126,12 @@ export default function MeetingRoomClient({
     });
   }, []);
 
-  // Production WebRTC connect options with dual STUN + configurable TURN servers
+  // STEP 1: Production WebRTC connect options without hardcoded ICE override.
+  // We do NOT supply a custom rtcConfig.iceServers list so that livekit-client
+  // seamlessly applies the authoritative TURN servers (UDP + TCP) returned in the SFU JoinResponse.
   const connectOptions = useMemo<RoomConnectOptions>(
     () => ({
       autoSubscribe: true,
-      rtcConfig: {
-        iceServers: getIceServers(),
-      },
     }),
     []
   );
@@ -337,6 +297,18 @@ export default function MeetingRoomClient({
     }
   }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName, participantIdentity, meetingTitle, connectOptions]);
 
+  // Expose room on window for diagnostics and verification
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      (window as unknown as { __room?: Room; __gracemeet_room?: Room }).__room = room;
+      (window as unknown as { __room?: Room; __gracemeet_room?: Room }).__gracemeet_room = room;
+    }
+  }, [room]);
+
+  const handleUserChoiceChange = useCallback((update: Partial<PreJoinChoices>) => {
+    setUserChoices((prev) => ({ ...prev, ...update }));
+  }, []);
+
   // If no token, present the mobile-first PreJoin screen
   if (!token) {
     return (
@@ -352,13 +324,13 @@ export default function MeetingRoomClient({
   }
 
   // Constraint 1: <LiveKitRoom> MUST remain mounted for the entire active meeting.
-  // Media errors must never render a branch that unmounts LiveKitRoom.
+  // STEP 2: Mount LiveKitRoom with userChoices media options so useLiveKitRoom does not force media disabled.
   return (
     <LiveKitRoom
       room={room}
       connectOptions={connectOptions}
-      video={false}
-      audio={false}
+      video={userChoices.isCamEnabled ? { facingMode: userChoices.facingMode || "user" } : false}
+      audio={userChoices.isMicEnabled ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false}
       token={token}
       serverUrl={livekitUrl || undefined}
       connect={true}
@@ -375,6 +347,7 @@ export default function MeetingRoomClient({
         meetingTitle={meetingTitle}
         onLeave={handleLeave}
         userChoices={userChoices}
+        onUserChoiceChange={handleUserChoiceChange}
         isUnexpectedlyDisconnected={isUnexpectedlyDisconnected}
         isReconnectingManual={isReconnectingManual}
         onManualReconnect={handleManualReconnect}
@@ -389,6 +362,7 @@ function MeetingContent({
   meetingTitle,
   onLeave,
   userChoices,
+  onUserChoiceChange,
   isUnexpectedlyDisconnected,
   isReconnectingManual,
   onManualReconnect,
@@ -397,6 +371,7 @@ function MeetingContent({
   meetingTitle?: string;
   onLeave: () => void;
   userChoices: PreJoinChoices;
+  onUserChoiceChange?: (update: Partial<PreJoinChoices>) => void;
   isUnexpectedlyDisconnected: boolean;
   isReconnectingManual: boolean;
   onManualReconnect: () => Promise<void>;
@@ -411,7 +386,8 @@ function MeetingContent({
     room,
     userChoices.facingMode,
     userChoices.isCamEnabled,
-    userChoices.isMicEnabled
+    userChoices.isMicEnabled,
+    onUserChoiceChange
   );
 
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("grid");

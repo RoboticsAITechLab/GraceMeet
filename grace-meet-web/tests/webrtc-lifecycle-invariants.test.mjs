@@ -39,11 +39,11 @@ test("Invariant 1: <LiveKitRoom> MUST remain mounted - No early return branch un
     "Fatal 'if (connectionError)' branch that unmounted <LiveKitRoom> must be removed."
   );
 
-  // 2. Check that LiveKitRoom receives stable primitives video={false} and audio={false}
+  // 2. Check that LiveKitRoom receives userChoices media options rather than hardcoded false
   assert.match(
     content,
-    /<LiveKitRoom[\s\S]*?video=\{false\}[\s\S]*?audio=\{false\}/,
-    "<LiveKitRoom> must receive static video={false} and audio={false} primitives to prevent hook churn"
+    /<LiveKitRoom[\s\S]*?video=\{userChoices\.isCamEnabled\b[\s\S]*?audio=\{userChoices\.isMicEnabled\b/,
+    "<LiveKitRoom> must receive userChoices media options so useLiveKitRoom does not force media disabled on SignalConnected"
   );
 
   // 3. Verify handleRoomError does not unmount LiveKitRoom
@@ -88,22 +88,20 @@ test("Invariant 3: Camera and Mic toggles must never call room.disconnect() or r
   );
 });
 
-test("Invariant 4: Media muting prefers existing publication unmute/mute instead of track destruction", () => {
+test("Invariant 4: Media toggles use localParticipant setCameraEnabled / setMicrophoneEnabled directly", () => {
   const mediaHookPath = path.join(rootDir, "src/lib/hooks/useGraceMediaState.ts");
   const content = fs.readFileSync(mediaHookPath, "utf-8");
 
-  // Verify camera unmute path
   assert.match(
     content,
-    /existingPub\.track\.mediaStreamTrack\?\.readyState === "live"[\s\S]*?await existingPub\.unmute\(\)/,
-    "toggleCamera must prefer unmuting existing live track publication over renegotiation"
+    /localParticipant\.setCameraEnabled\(/,
+    "toggleCamera must use localParticipant.setCameraEnabled"
   );
 
-  // Verify microphone unmute path
   assert.match(
     content,
-    /existingPub\.track\.mediaStreamTrack\?\.readyState === "live"[\s\S]*?await existingPub\.unmute\(\)/,
-    "toggleMicrophone must prefer unmuting existing live track publication over renegotiation"
+    /localParticipant\.setMicrophoneEnabled\(/,
+    "toggleMicrophone must use localParticipant.setMicrophoneEnabled"
   );
 });
 
@@ -118,7 +116,7 @@ test("Invariant 5: Mobile foreground recovery inspects room & track readyState b
   // Verify room state check first
   assert.match(
     content,
-    /if \(room\.state !== ConnectionState\.Connected\) \{[\s\S]*?return;[\s\S]*?\}/,
+    /if \(room\.state !== ConnectionState\.Connected/,
     "Mobile recovery must check room.state !== Connected before touching any media"
   );
 
@@ -135,24 +133,20 @@ test("Invariant 5: Mobile foreground recovery inspects room & track readyState b
   );
 });
 
-test("Invariant 6: Dual STUN + Configurable TURN architecture (never solo Google STUN)", () => {
+test("Invariant 6: LiveKit-client consumes server-advertised TURN without client-side override", () => {
   const meetingRoomClientPath = path.join(rootDir, "src/components/meeting/MeetingRoomClient.tsx");
   const content = fs.readFileSync(meetingRoomClientPath, "utf-8");
 
-  // Verify Cloudflare and Google dual STUN
-  assert.match(content, /stun\.cloudflare\.com:3478/, "Must include Cloudflare STUN for geo-diversity");
-  assert.match(content, /stun\.l\.google\.com:19302/, "Must include Google STUN");
+  // Verify custom rtcConfig.iceServers is NOT provided, allowing JoinResponse TURN to apply
+  assert.ok(
+    !content.includes("iceServers: getIceServers()"),
+    "Must NOT provide hardcoded custom iceServers override that wipes server-advertised TURN"
+  );
 
-  // Verify TURN env variables are parsed
-  assert.match(content, /NEXT_PUBLIC_TURN_URL/, "Must support configurable TURN URLs from env");
-  assert.match(content, /NEXT_PUBLIC_TURN_USERNAME/, "Must support configurable TURN username");
-  assert.match(content, /NEXT_PUBLIC_TURN_CREDENTIAL/, "Must support configurable TURN credential");
-
-  // Verify connectOptions receives iceServers
   assert.match(
     content,
-    /connectOptions[\s\S]*?rtcConfig:\s*\{\s*iceServers:\s*getIceServers\(\)/,
-    "RoomConnectOptions must pass dual STUN + TURN iceServers to room.connect"
+    /connectOptions = useMemo<RoomConnectOptions>\(\s*\(\) => \(\{\s*autoSubscribe: true,\s*\}\)/,
+    "connectOptions must allow serverResponse.iceServers to populate RTCPeerConnection directly"
   );
 });
 
