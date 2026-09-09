@@ -5,12 +5,11 @@ import { ConnectionState } from "livekit-client";
 import {
   Users,
   Share2,
-  Wifi,
-  WifiOff,
   LayoutGrid,
   UserCheck,
 } from "lucide-react";
 import ShareInvite from "./ShareInvite";
+import LiveKitStatus from "./LiveKitStatus";
 
 export type LayoutMode = "grid" | "speaker";
 
@@ -18,7 +17,7 @@ interface MeetingHeaderProps {
   meetingId: string;
   meetingTitle?: string;
   participantCount: number;
-  connectionState: ConnectionState;
+  connectionState?: ConnectionState;
   layoutMode: LayoutMode;
   onToggleLayout: (mode: LayoutMode) => void;
 }
@@ -27,7 +26,6 @@ export default function MeetingHeader({
   meetingId,
   meetingTitle,
   participantCount,
-  connectionState,
   layoutMode,
   onToggleLayout,
 }: MeetingHeaderProps) {
@@ -99,20 +97,8 @@ export default function MeetingHeader({
             {formatTimer(elapsedSeconds)}
           </div>
 
-          {/* Connection Indicator */}
-          <div className="flex items-center">
-            {connectionState === ConnectionState.Connected ? (
-              <span className="flex items-center gap-1 text-emerald-400 bg-emerald-500/10 p-1.5 sm:px-2 sm:py-1 rounded-lg border border-emerald-500/20 text-[10px]">
-                <Wifi className="w-3 h-3 text-emerald-400" />
-                <span className="hidden md:inline">Connected</span>
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-amber-400 bg-amber-500/10 p-1.5 sm:px-2 sm:py-1 rounded-lg border border-amber-500/20 text-[10px]">
-                <WifiOff className="w-3 h-3 text-amber-400 animate-pulse" />
-                <span className="hidden md:inline">{connectionState}</span>
-              </span>
-            )}
-          </div>
+          {/* LiveKit Real-Time Status & Diagnostics Indicator */}
+          <LiveKitStatus />
 
           {/* Participant Count */}
           <div className="flex items-center gap-1 text-slate-300 bg-slate-900/90 px-2 py-1 rounded-lg border border-slate-800 text-[10px] sm:text-xs">
