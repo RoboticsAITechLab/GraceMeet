@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useLocalParticipant } from "@livekit/components-react";
 import {
   Room,
   Track,
   RoomEvent,
-  ParticipantEvent,
   LocalTrackPublication,
+  LocalVideoTrack,
+  ConnectionState,
 } from "livekit-client";
 
 export interface GraceMediaState {
@@ -29,31 +31,107 @@ export interface GraceMediaState {
   clearErrors: () => void;
 }
 
+/**
+ * Formats low-level browser MediaStream errors into user-friendly guidance.
+ */
+function formatMediaError(err: unknown, deviceKind: "camera" | "microphone"): Error {
+  if (err instanceof Error) {
+    const name = err.name || "";
+    const msg = err.message || "";
+    const lower = msg.toLowerCase();
+
+    // 1. Permission Denied
+    if (
+      name === "NotAllowedError" ||
+      name === "PermissionDeniedError" ||
+      lower.includes("permission") ||
+      lower.includes("denied") ||
+      lower.includes("not allowed")
+    ) {
+      return new Error(
+        deviceKind === "camera"
+          ? "Camera permission is blocked. Please allow camera access in browser settings (🔒 icon) and try again."
+          : "Microphone permission is blocked. Please allow microphone access in browser settings (🔒 icon) and try again."
+      );
+    }
+
+    // 2. Hardware in use / busy
+    if (
+      name === "NotReadableError" ||
+      name === "TrackStartError" ||
+      name === "AbortError" ||
+      lower.includes("in use") ||
+      lower.includes("busy") ||
+      lower.includes("could not start")
+    ) {
+      return new Error(
+        deviceKind === "camera"
+          ? "Camera is currently in use or busy. Please close other camera apps and retry."
+          : "Microphone is currently in use or busy. Please close other audio apps and retry."
+      );
+    }
+
+    // 3. Device Not Found
+    if (
+      name === "NotFoundError" ||
+      name === "DevicesNotFoundError" ||
+      lower.includes("not found")
+    ) {
+      return new Error(
+        deviceKind === "camera"
+          ? "No camera device found. Please connect a video input device."
+          : "No microphone device found. Please connect an audio input device."
+      );
+    }
+
+    // 4. Constraint mismatch
+    if (name === "OverconstrainedError" || lower.includes("constraint")) {
+      return new Error(
+        deviceKind === "camera"
+          ? "Camera format or resolution constraint is not supported by your device."
+          : "Microphone configuration constraint is not supported by your device."
+      );
+    }
+
+    return new Error(msg || `Error activating ${deviceKind}.`);
+  }
+
+  return new Error(`Failed to access ${deviceKind}. Please check device permissions.`);
+}
+
 export function useGraceMediaState(
   room: Room | undefined,
   initialFacingMode: "user" | "environment" = "user",
   initialCamEnabled: boolean = true,
   initialMicEnabled: boolean = true
 ): GraceMediaState {
-  const [isCameraEnabled, setIsCameraEnabled] = useState(initialCamEnabled);
-  const [isMicrophoneEnabled, setIsMicrophoneEnabled] = useState(initialMicEnabled);
+  // Phase 1: LiveKit native LocalParticipant state as Single Source of Truth
+  const {
+    localParticipant,
+    isCameraEnabled,
+    isMicrophoneEnabled,
+  } = useLocalParticipant({ room });
+
+  // Concurrency guards for rapid user interactions
   const [isCameraPending, setIsCameraPending] = useState(false);
   const [isMicPending, setIsMicPending] = useState(false);
+  const isCameraPendingRef = useRef(false);
+  const isMicPendingRef = useRef(false);
+
+  // User-facing media error states
   const [cameraError, setCameraError] = useState<Error | null>(null);
   const [micError, setMicError] = useState<Error | null>(null);
+
+  // Mobile camera facingMode and camera detection
   const [facingMode, setFacingMode] =
     useState<"user" | "environment">(initialFacingMode);
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
-
-  // Persistent desired intent to restore state across reconnection
-  const desiredCameraStateRef = useRef(initialCamEnabled);
-  const desiredMicStateRef = useRef(initialMicEnabled);
-
-  const isCameraPendingRef = useRef(false);
-  const isMicPendingRef = useRef(false);
   const isFlippingRef = useRef(false);
 
-  // Check available cameras
+  // Guard to ensure initial sequential media acquisition runs exactly once on room join
+  const initialAcquisitionDoneRef = useRef(false);
+
+  // Detect available camera hardware
   useEffect(() => {
     async function checkCameras() {
       try {
@@ -68,332 +146,240 @@ export function useGraceMediaState(
       }
     }
     checkCameras();
-  }, []);
 
-  // Synchronous extraction of actual LiveKit publication and track states
-  const syncMediaState = useCallback(() => {
-    if (!room || !room.localParticipant) {
-      return;
+    if (room) {
+      const handleDevicesChanged = () => {
+        checkCameras();
+      };
+      room.on(RoomEvent.MediaDevicesChanged, handleDevicesChanged);
+      return () => {
+        room.off(RoomEvent.MediaDevicesChanged, handleDevicesChanged);
+      };
     }
-
-    const localP = room.localParticipant;
-    const camPub = localP.getTrackPublication(Track.Source.Camera);
-    const micPub = localP.getTrackPublication(Track.Source.Microphone);
-
-    // Camera is truly active if publication exists, is not muted, and track is live
-    const camActive =
-      !!camPub &&
-      !camPub.isMuted &&
-      (!camPub.track || camPub.track.mediaStreamTrack.readyState !== "ended");
-
-    // Microphone is truly active if publication exists, is not muted, and track is live
-    const micActive =
-      !!micPub &&
-      !micPub.isMuted &&
-      (!micPub.track || micPub.track.mediaStreamTrack.readyState !== "ended");
-
-    // Reconcile with LiveKit's native participant booleans
-    const finalCam = camActive || localP.isCameraEnabled;
-    const finalMic = micActive || localP.isMicrophoneEnabled;
-
-    setIsCameraEnabled(finalCam);
-    setIsMicrophoneEnabled(finalMic);
-
-    console.log(
-      `[GraceMeet][Media] Synchronized -> Camera: ${finalCam ? "ON" : "OFF"} (pub=${!!camPub}, muted=${camPub?.isMuted ?? "n/a"}), Mic: ${finalMic ? "ON" : "OFF"} (pub=${!!micPub}, muted=${micPub?.isMuted ?? "n/a"})`
-    );
   }, [room]);
 
-  // Subscribe to all relevant LiveKit events for automatic reactive synchronization
+  // Surface native LiveKit media device errors to UI error state
   useEffect(() => {
     if (!room) return;
 
-    queueMicrotask(syncMediaState);
-
-    const localP = room.localParticipant;
-
-    const handleMediaChange = () => {
-      syncMediaState();
-    };
-
     const handleDeviceError = (err: Error) => {
-      console.warn("[GraceMeet][Media] Device error:", err);
+      console.warn("[GraceMeet][Media] Media device notice from Room:", err);
       const msg = err.message.toLowerCase();
       if (msg.includes("video") || msg.includes("camera")) {
-        setCameraError(err);
+        setCameraError(formatMediaError(err, "camera"));
       } else {
-        setMicError(err);
+        setMicError(formatMediaError(err, "microphone"));
       }
-      syncMediaState();
     };
 
-    // Reconnection media restoration handler
-    const handleReconnected = async () => {
-      console.log(
-        "[GraceMeet][Reconnect] Reconnected! Verifying & restoring media tracks..."
-      );
-      syncMediaState();
-
-      // Restore camera if user intended camera ON
-      if (desiredCameraStateRef.current) {
-        const camPub = localP.getTrackPublication(Track.Source.Camera);
-        if (
-          !camPub ||
-          camPub.isMuted ||
-          camPub.track?.mediaStreamTrack.readyState === "ended"
-        ) {
-          try {
-            console.log("[GraceMeet][Reconnect] Restoring local camera publication...");
-            await localP.setCameraEnabled(true, { facingMode });
-          } catch (err) {
-            console.warn("[GraceMeet][Reconnect] Camera restore failed:", err);
-            desiredCameraStateRef.current = false;
-          }
-        }
-      }
-
-      // Restore mic if user intended mic ON
-      if (desiredMicStateRef.current) {
-        const micPub = localP.getTrackPublication(Track.Source.Microphone);
-        if (
-          !micPub ||
-          micPub.isMuted ||
-          micPub.track?.mediaStreamTrack.readyState === "ended"
-        ) {
-          try {
-            console.log("[GraceMeet][Reconnect] Restoring local microphone publication...");
-            await localP.setMicrophoneEnabled(true);
-          } catch (err) {
-            console.warn("[GraceMeet][Reconnect] Mic restore failed:", err);
-            desiredMicStateRef.current = false;
-          }
-        }
-      }
-
-      syncMediaState();
-    };
-
-    // Participant events
-    localP.on(ParticipantEvent.TrackMuted, handleMediaChange);
-    localP.on(ParticipantEvent.TrackUnmuted, handleMediaChange);
-    localP.on(ParticipantEvent.LocalTrackPublished, handleMediaChange);
-    localP.on(ParticipantEvent.LocalTrackUnpublished, handleMediaChange);
-    localP.on(ParticipantEvent.ParticipantPermissionsChanged, handleMediaChange);
-
-    // Room events
-    room.on(RoomEvent.LocalTrackPublished, handleMediaChange);
-    room.on(RoomEvent.LocalTrackUnpublished, handleMediaChange);
-    room.on(RoomEvent.TrackMuted, handleMediaChange);
-    room.on(RoomEvent.TrackUnmuted, handleMediaChange);
-    room.on(RoomEvent.SignalConnected, handleMediaChange);
-    room.on(RoomEvent.Connected, handleMediaChange);
-    room.on(RoomEvent.Reconnected, handleReconnected);
     room.on(RoomEvent.MediaDevicesError, handleDeviceError);
-
     return () => {
-      localP.off(ParticipantEvent.TrackMuted, handleMediaChange);
-      localP.off(ParticipantEvent.TrackUnmuted, handleMediaChange);
-      localP.off(ParticipantEvent.LocalTrackPublished, handleMediaChange);
-      localP.off(ParticipantEvent.LocalTrackUnpublished, handleMediaChange);
-      localP.off(ParticipantEvent.ParticipantPermissionsChanged, handleMediaChange);
-
-      room.off(RoomEvent.LocalTrackPublished, handleMediaChange);
-      room.off(RoomEvent.LocalTrackUnpublished, handleMediaChange);
-      room.off(RoomEvent.TrackMuted, handleMediaChange);
-      room.off(RoomEvent.TrackUnmuted, handleMediaChange);
-      room.off(RoomEvent.SignalConnected, handleMediaChange);
-      room.off(RoomEvent.Connected, handleMediaChange);
-      room.off(RoomEvent.Reconnected, handleReconnected);
       room.off(RoomEvent.MediaDevicesError, handleDeviceError);
     };
-  }, [room, facingMode, syncMediaState]);
+  }, [room]);
 
-  // Robust Camera Toggle
+  // Phase 2: Ordered Sequential Acquisition upon entering the meeting
+  // Microphone is initialized first, Camera second.
+  // Eliminates mobile hardware sensor contention and concurrent getUserMedia collision.
+  useEffect(() => {
+    if (!room || initialAcquisitionDoneRef.current) return;
+
+    let isCancelled = false;
+
+    const runOrderedAcquisition = async () => {
+      if (initialAcquisitionDoneRef.current || isCancelled) return;
+      initialAcquisitionDoneRef.current = true;
+
+      console.log(
+        `[GraceMeet][Media] Starting ordered acquisition -> Mic: ${initialMicEnabled ? "ON" : "OFF"}, Cam: ${initialCamEnabled ? "ON" : "OFF"}`
+      );
+
+      // Step 1: Microphone acquired FIRST
+      if (initialMicEnabled) {
+        try {
+          isMicPendingRef.current = true;
+          setIsMicPending(true);
+          await room.localParticipant.setMicrophoneEnabled(true, {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          });
+          console.log("[GraceMeet][Media] Initial microphone published successfully");
+        } catch (err: unknown) {
+          if (!isCancelled) {
+            const error = formatMediaError(err, "microphone");
+            console.warn("[GraceMeet][Media] Initial mic acquisition error:", error);
+            setMicError(error);
+          }
+        } finally {
+          isMicPendingRef.current = false;
+          if (!isCancelled) setIsMicPending(false);
+        }
+      }
+
+      // Step 2: Camera acquired SECOND (sequential to prevent mobile hardware sensor contention)
+      if (initialCamEnabled && !isCancelled) {
+        try {
+          isCameraPendingRef.current = true;
+          setIsCameraPending(true);
+          await room.localParticipant.setCameraEnabled(true, { facingMode });
+          console.log("[GraceMeet][Media] Initial camera published successfully");
+        } catch (err: unknown) {
+          if (!isCancelled) {
+            const error = formatMediaError(err, "camera");
+            console.warn("[GraceMeet][Media] Initial camera acquisition error:", error);
+            setCameraError(error);
+          }
+        } finally {
+          isCameraPendingRef.current = false;
+          if (!isCancelled) setIsCameraPending(false);
+        }
+      }
+    };
+
+    if (room.state === ConnectionState.Connected) {
+      runOrderedAcquisition();
+    } else {
+      room.once(RoomEvent.SignalConnected, runOrderedAcquisition);
+      room.once(RoomEvent.Connected, runOrderedAcquisition);
+    }
+
+    return () => {
+      isCancelled = true;
+      room.off(RoomEvent.SignalConnected, runOrderedAcquisition);
+      room.off(RoomEvent.Connected, runOrderedAcquisition);
+    };
+  }, [room, initialCamEnabled, initialMicEnabled, facingMode]);
+
+  // Robust Camera Toggle: directly modifies localParticipant, no stale boolean inversion
   const toggleCamera = useCallback(async (): Promise<boolean> => {
-    if (!room || !room.localParticipant || isCameraPendingRef.current) {
+    if (!localParticipant || isCameraPendingRef.current) {
       return isCameraEnabled;
     }
 
-    const localP = room.localParticipant;
     isCameraPendingRef.current = true;
     setIsCameraPending(true);
     setCameraError(null);
 
-    const currentActual = localP.isCameraEnabled;
-    const targetState = !currentActual;
-    desiredCameraStateRef.current = targetState;
-
+    const targetState = !localParticipant.isCameraEnabled;
     console.log(
-      `[GraceMeet][Media] Toggle Camera: Current=${currentActual ? "ON" : "OFF"} -> Target=${targetState ? "ON" : "OFF"}`
+      `[GraceMeet][Media] Toggle Camera: Current=${localParticipant.isCameraEnabled ? "ON" : "OFF"} -> Target=${targetState ? "ON" : "OFF"}`
     );
 
     try {
       if (targetState) {
-        // Turning ON
-        await localP.setCameraEnabled(true, { facingMode });
+        await localParticipant.setCameraEnabled(true, { facingMode });
       } else {
-        // Turning OFF (mute/unpublish)
-        await localP.setCameraEnabled(false);
+        await localParticipant.setCameraEnabled(false);
       }
-
-      syncMediaState();
-      return localP.isCameraEnabled;
+      return localParticipant.isCameraEnabled;
     } catch (err: unknown) {
-      desiredCameraStateRef.current = false;
-      let friendlyMessage = "Camera permission or hardware error";
-      if (err instanceof Error) {
-        if (
-          err.name === "NotAllowedError" ||
-          err.name === "PermissionDeniedError" ||
-          err.message.toLowerCase().includes("permission")
-        ) {
-          friendlyMessage =
-            "Camera permission is blocked. Open browser settings (🔒 icon) and allow camera access for GraceMeet.";
-        } else if (
-          err.name === "NotFoundError" ||
-          err.name === "DevicesNotFoundError" ||
-          err.message.toLowerCase().includes("not found")
-        ) {
-          friendlyMessage = "Camera not found. Please connect a video device.";
-        } else if (
-          err.name === "NotReadableError" ||
-          err.name === "TrackStartError" ||
-          err.message.toLowerCase().includes("in use")
-        ) {
-          friendlyMessage =
-            "Camera is already in use by another app. Please close other camera apps and retry.";
-        } else {
-          friendlyMessage = err.message;
-        }
-      }
-      const error = new Error(friendlyMessage);
+      const error = formatMediaError(err, "camera");
       console.error("[GraceMeet][Media] Camera toggle failed:", error);
       setCameraError(error);
-      syncMediaState();
       throw error;
     } finally {
       isCameraPendingRef.current = false;
       setIsCameraPending(false);
     }
-  }, [room, facingMode, isCameraEnabled, syncMediaState]);
+  }, [localParticipant, facingMode, isCameraEnabled]);
 
-  // Robust Microphone Toggle
+  // Robust Microphone Toggle: directly modifies localParticipant, no stale boolean inversion
   const toggleMicrophone = useCallback(async (): Promise<boolean> => {
-    if (!room || !room.localParticipant || isMicPendingRef.current) {
+    if (!localParticipant || isMicPendingRef.current) {
       return isMicrophoneEnabled;
     }
 
-    const localP = room.localParticipant;
     isMicPendingRef.current = true;
     setIsMicPending(true);
     setMicError(null);
 
-    const currentActual = localP.isMicrophoneEnabled;
-    const targetState = !currentActual;
-    desiredMicStateRef.current = targetState;
-
+    const targetState = !localParticipant.isMicrophoneEnabled;
     console.log(
-      `[GraceMeet][Media] Toggle Microphone: Current=${currentActual ? "ON" : "OFF"} -> Target=${targetState ? "ON" : "OFF"}`
+      `[GraceMeet][Media] Toggle Microphone: Current=${localParticipant.isMicrophoneEnabled ? "ON" : "OFF"} -> Target=${targetState ? "ON" : "OFF"}`
     );
 
     try {
       if (targetState) {
-        await localP.setMicrophoneEnabled(true);
+        await localParticipant.setMicrophoneEnabled(true, {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        });
       } else {
-        await localP.setMicrophoneEnabled(false);
+        await localParticipant.setMicrophoneEnabled(false);
       }
-
-      syncMediaState();
-      return localP.isMicrophoneEnabled;
+      return localParticipant.isMicrophoneEnabled;
     } catch (err: unknown) {
-      desiredMicStateRef.current = false;
-      let friendlyMessage = "Microphone permission or hardware error";
-      if (err instanceof Error) {
-        if (
-          err.name === "NotAllowedError" ||
-          err.name === "PermissionDeniedError" ||
-          err.message.toLowerCase().includes("permission")
-        ) {
-          friendlyMessage =
-            "Microphone permission is blocked. Open browser settings (🔒 icon) and allow microphone access for GraceMeet.";
-        } else if (
-          err.name === "NotFoundError" ||
-          err.name === "DevicesNotFoundError"
-        ) {
-          friendlyMessage =
-            "Microphone not found. Please connect an audio input device.";
-        } else {
-          friendlyMessage = err.message;
-        }
-      }
-      const error = new Error(friendlyMessage);
+      const error = formatMediaError(err, "microphone");
       console.error("[GraceMeet][Media] Microphone toggle failed:", error);
       setMicError(error);
-      syncMediaState();
       throw error;
     } finally {
       isMicPendingRef.current = false;
       setIsMicPending(false);
     }
-  }, [room, isMicrophoneEnabled, syncMediaState]);
+  }, [localParticipant, isMicrophoneEnabled]);
 
-  // Flip Camera for Mobile Devices
+  // Flip Camera: uses native LiveKit restartTrack to seamlessly swap camera sensors
   const flipCamera = useCallback(async () => {
     if (
       !room ||
-      !room.localParticipant ||
-      !room.localParticipant.isCameraEnabled ||
+      !localParticipant ||
+      !localParticipant.isCameraEnabled ||
       isFlippingRef.current
     ) {
       return;
     }
 
-    const localP = room.localParticipant;
     isFlippingRef.current = true;
     const nextFacing = facingMode === "user" ? "environment" : "user";
-    console.log(
-      `[GraceMeet][Media] Flip Camera: ${facingMode} -> ${nextFacing}`
-    );
+    console.log(`[GraceMeet][Media] Flip Camera: ${facingMode} -> ${nextFacing}`);
 
     try {
-      const devices = await Room.getLocalDevices("videoinput");
-      if (devices.length > 1) {
-        const currentPub = localP.getTrackPublication(Track.Source.Camera);
-        const currentDeviceId =
-          currentPub?.track?.mediaStreamTrack?.getSettings()?.deviceId;
-        const otherDevice = devices.find(
-          (d) => d.deviceId && d.deviceId !== currentDeviceId
-        );
-        if (otherDevice) {
-          await room.switchActiveDevice("videoinput", otherDevice.deviceId);
-          setFacingMode(nextFacing);
-          syncMediaState();
-          return;
-        }
-      }
+      const camPub = localParticipant.getTrackPublication(Track.Source.Camera);
+      const videoTrack = camPub?.track;
 
-      // Fallback: cycle camera with alternate facingMode
-      await localP.setCameraEnabled(false);
-      await new Promise((r) => setTimeout(r, 120));
-      await localP.setCameraEnabled(true, { facingMode: nextFacing });
-      setFacingMode(nextFacing);
-      syncMediaState();
-    } catch (err) {
+      if (videoTrack instanceof LocalVideoTrack) {
+        await videoTrack.restartTrack({ facingMode: nextFacing });
+        setFacingMode(nextFacing);
+      } else {
+        const devices = await Room.getLocalDevices("videoinput");
+        if (devices.length > 1) {
+          const currentDeviceId = videoTrack?.mediaStreamTrack?.getSettings()?.deviceId;
+          const other = devices.find((d) => d.deviceId && d.deviceId !== currentDeviceId);
+          if (other?.deviceId) {
+            await room.switchActiveDevice("videoinput", other.deviceId);
+            setFacingMode(nextFacing);
+            return;
+          }
+        }
+        await localParticipant.setCameraEnabled(false);
+        await localParticipant.setCameraEnabled(true, { facingMode: nextFacing });
+        setFacingMode(nextFacing);
+      }
+    } catch (err: unknown) {
       console.error("[GraceMeet][Media] Flip camera error:", err);
+      setCameraError(formatMediaError(err, "camera"));
     } finally {
       isFlippingRef.current = false;
     }
-  }, [room, facingMode, syncMediaState]);
+  }, [room, localParticipant, facingMode]);
 
   const clearErrors = useCallback(() => {
     setCameraError(null);
     setMicError(null);
   }, []);
 
-  const cameraPublication = room?.localParticipant?.getTrackPublication(
+  const syncMediaState = useCallback(() => {
+    // Kept for interface backward compatibility.
+    // Media state is reactively driven by LiveKit's useLocalParticipant.
+  }, []);
+
+  const cameraPublication = localParticipant?.getTrackPublication(
     Track.Source.Camera
   );
-  const microphonePublication = room?.localParticipant?.getTrackPublication(
+  const microphonePublication = localParticipant?.getTrackPublication(
     Track.Source.Microphone
   );
 

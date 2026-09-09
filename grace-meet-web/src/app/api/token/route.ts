@@ -1,18 +1,24 @@
 import { AccessToken } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const meetingId = body.meetingId || body.roomName;
     const participantName = body.participantName;
+    const clientIdentity = body.participantIdentity || body.identity;
 
-    const validationError = validateInputs(meetingId, participantName);
+    const validationError = validateInputs(meetingId, participantName, clientIdentity);
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    return await generateTokenResponse(meetingId.trim(), participantName.trim());
+    return await generateTokenResponse(
+      meetingId.trim(),
+      participantName.trim(),
+      typeof clientIdentity === "string" ? clientIdentity.trim() : undefined
+    );
   } catch (err: unknown) {
     console.error("Error generating LiveKit token:", err);
     return NextResponse.json(
@@ -33,13 +39,20 @@ export async function GET(req: NextRequest) {
       searchParams.get("participantName") ||
       searchParams.get("name") ||
       searchParams.get("username");
+    const clientIdentity =
+      searchParams.get("participantIdentity") ||
+      searchParams.get("identity");
 
-    const validationError = validateInputs(meetingId, participantName);
+    const validationError = validateInputs(meetingId, participantName, clientIdentity);
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    return await generateTokenResponse(meetingId!.trim(), participantName!.trim());
+    return await generateTokenResponse(
+      meetingId!.trim(),
+      participantName!.trim(),
+      clientIdentity ? clientIdentity.trim() : undefined
+    );
   } catch (err: unknown) {
     console.error("Error generating LiveKit token:", err);
     return NextResponse.json(
@@ -49,7 +62,11 @@ export async function GET(req: NextRequest) {
   }
 }
 
-function validateInputs(meetingId: unknown, participantName: unknown): string | null {
+function validateInputs(
+  meetingId: unknown,
+  participantName: unknown,
+  participantIdentity?: unknown
+): string | null {
   if (!meetingId || typeof meetingId !== "string" || meetingId.trim().length === 0) {
     return "Meeting ID is required";
   }
@@ -75,10 +92,30 @@ function validateInputs(meetingId: unknown, participantName: unknown): string | 
     return "Participant name must be under 64 characters";
   }
 
+  // If client provides a session identity, validate format and length
+  if (participantIdentity !== undefined && participantIdentity !== null) {
+    if (typeof participantIdentity !== "string") {
+      return "Participant identity must be a string";
+    }
+    const cleanIdentity = participantIdentity.trim();
+    if (cleanIdentity.length < 3 || cleanIdentity.length > 128) {
+      return "Participant identity must be between 3 and 128 characters";
+    }
+    // Safe characters for LiveKit identity: alphanumeric, underscores, hyphens, dots
+    const identityRegex = /^[a-zA-Z0-9_.-]+$/;
+    if (!identityRegex.test(cleanIdentity)) {
+      return "Participant identity can only contain letters, numbers, underscores, hyphens, and periods";
+    }
+  }
+
   return null;
 }
 
-async function generateTokenResponse(meetingId: string, participantName: string) {
+async function generateTokenResponse(
+  meetingId: string,
+  participantName: string,
+  clientIdentity?: string
+) {
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   const livekitUrl = process.env.LIVEKIT_URL || "ws://localhost:7880";
@@ -94,9 +131,16 @@ async function generateTokenResponse(meetingId: string, participantName: string)
   // LiveKit Room mapping: GraceMeet meetingId maps directly to the underlying media room
   const livekitRoomName = meetingId;
 
-  // Generate unique identity per tab to prevent accidental collisions if user opens 2 tabs with same name
-  const randomSuffix = Math.random().toString(36).substring(2, 7);
-  const participantIdentity = `${participantName}__${randomSuffix}`;
+  // Use client-provided stable session identity if available, otherwise generate a deterministic fallback
+  let participantIdentity: string;
+  if (clientIdentity && clientIdentity.length >= 3) {
+    participantIdentity = clientIdentity;
+  } else {
+    // Deterministic fallback: sanitizedName__sessionUUID
+    const safeName = participantName.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20) || "user";
+    const sessionSuffix = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    participantIdentity = `${safeName}__${sessionSuffix}`;
+  }
 
   const at = new AccessToken(apiKey, apiSecret, {
     identity: participantIdentity,
@@ -119,5 +163,7 @@ async function generateTokenResponse(meetingId: string, participantName: string)
     token,
     url: livekitUrl,
     meetingId,
+    participantIdentity,
   });
 }
+

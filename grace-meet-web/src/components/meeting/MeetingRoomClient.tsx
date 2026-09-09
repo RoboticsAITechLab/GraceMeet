@@ -19,6 +19,7 @@ import {
   ConnectionState,
   DisconnectReason,
   RoomEvent,
+  MediaDeviceFailure,
 } from "livekit-client";
 import { RotateCw, WifiOff, AlertCircle } from "lucide-react";
 import PreJoinScreen, { PreJoinChoices } from "./PreJoinScreen";
@@ -37,6 +38,44 @@ interface MeetingRoomClientProps {
   initialParticipantName?: string;
 }
 
+/**
+ * Resolves or generates a stable participant identity scoped to this browser tab's meeting session.
+ * - Stored in sessionStorage under `gracemeet_identity_${meetingId}`.
+ * - Stays identical during auto-reconnects and manual reconnects within this session.
+ * - Distinct per browser tab, ensuring two tabs never collide into the same identity.
+ * - Does not store sensitive tokens.
+ */
+function getOrCreateSessionIdentity(meetingId: string, participantName: string): string {
+  const storageKey = `gracemeet_identity_${meetingId}`;
+  if (typeof window !== "undefined" && window.sessionStorage) {
+    try {
+      const existing = sessionStorage.getItem(storageKey);
+      if (existing && /^[a-zA-Z0-9_.-]{3,128}$/.test(existing)) {
+        return existing;
+      }
+    } catch {
+      // sessionStorage may be unavailable or restricted
+    }
+  }
+
+  const safeName = participantName.trim().replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20) || "user";
+  const uniqueSuffix =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+      : Math.random().toString(36).substring(2, 14);
+  const newIdentity = `${safeName}__${uniqueSuffix}`;
+
+  if (typeof window !== "undefined" && window.sessionStorage) {
+    try {
+      sessionStorage.setItem(storageKey, newIdentity);
+    } catch {
+      // ignore quota / security errors
+    }
+  }
+
+  return newIdentity;
+}
+
 export default function MeetingRoomClient({
   meetingId: propMeetingId,
   roomName: propRoomName,
@@ -47,6 +86,7 @@ export default function MeetingRoomClient({
 
   const [token, setToken] = useState<string | null>(null);
   const [livekitUrl, setLivekitUrl] = useState<string | null>(null);
+  const [participantIdentity, setParticipantIdentity] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [isUnexpectedlyDisconnected, setIsUnexpectedlyDisconnected] =
@@ -90,12 +130,16 @@ export default function MeetingRoomClient({
       setIsUnexpectedlyDisconnected(false);
 
       try {
+        const sessionIdentity = getOrCreateSessionIdentity(meetingId, choices.participantName);
+        setParticipantIdentity(sessionIdentity);
+
         const res = await fetch("/api/token", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             meetingId,
             participantName: choices.participantName,
+            participantIdentity: sessionIdentity,
           }),
         });
 
@@ -104,8 +148,14 @@ export default function MeetingRoomClient({
           throw new Error(data.error || "Failed to generate meeting credentials");
         }
 
-        // Give phone camera driver 120ms to release preview hardware handle
-        await new Promise((r) => setTimeout(r, 120));
+        if (data.participantIdentity) {
+          setParticipantIdentity(data.participantIdentity);
+          try {
+            sessionStorage.setItem(`gracemeet_identity_${meetingId}`, data.participantIdentity);
+          } catch {
+            // ignore
+          }
+        }
 
         setToken(data.token);
         setLivekitUrl(data.url);
@@ -130,6 +180,37 @@ export default function MeetingRoomClient({
     router.push("/");
   }, [router, room]);
 
+  // Stabilized LiveKitRoom callbacks to avoid effect churn on re-renders
+  const handleRoomConnected = useCallback(() => {
+    console.log("[GraceMeet][Room] Connected to LiveKit SFU");
+    setIsUnexpectedlyDisconnected(false);
+  }, []);
+
+  const handleRoomDisconnected = useCallback(
+    (reason?: DisconnectReason) => {
+      console.log("[GraceMeet][Room] Room disconnected, reason:", reason);
+      if (reason === DisconnectReason.CLIENT_INITIATED) {
+        handleLeave();
+      } else {
+        // Do NOT kick user out of meeting on network drops! Show recovery dialog
+        setIsUnexpectedlyDisconnected(true);
+      }
+    },
+    [handleLeave]
+  );
+
+  const handleMediaDeviceFailure = useCallback(
+    (failure?: MediaDeviceFailure, kind?: MediaDeviceKind) => {
+      console.warn("[GraceMeet][Media] Media device notice:", failure, kind);
+    },
+    []
+  );
+
+  const handleRoomError = useCallback((error: Error) => {
+    console.error("[GraceMeet][Room] Room error:", error);
+    setConnectionError(error.message || "Connection error with LiveKit server");
+  }, []);
+
   // Reset unexpected disconnect state if room successfully reconnects
   useEffect(() => {
     const handleConnectedOrReconnected = () => {
@@ -151,25 +232,34 @@ export default function MeetingRoomClient({
     setIsReconnectingManual(true);
     console.log("[GraceMeet][Reconnect] Attempting manual room reconnection...");
     try {
-      await room.connect(livekitUrl, token);
+      if (room.state === ConnectionState.Disconnected) {
+        await room.connect(livekitUrl, token);
+      }
       setIsUnexpectedlyDisconnected(false);
     } catch (err) {
       console.error("[GraceMeet][Reconnect] Direct reconnect failed:", err);
-      // If token expired, fetch fresh token and connect
+      // If token expired, fetch fresh token using the EXACT same participant identity
       try {
+        const stableIdentity =
+          participantIdentity ||
+          getOrCreateSessionIdentity(meetingId, userChoices.participantName);
+
         const res = await fetch("/api/token", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             meetingId,
             participantName: userChoices.participantName,
+            participantIdentity: stableIdentity,
           }),
         });
         const data = await res.json();
         if (data.token) {
           setToken(data.token);
           setLivekitUrl(data.url);
-          await room.connect(data.url, data.token);
+          if (room.state === ConnectionState.Disconnected) {
+            await room.connect(data.url, data.token);
+          }
           setIsUnexpectedlyDisconnected(false);
         }
       } catch (refreshErr) {
@@ -178,7 +268,7 @@ export default function MeetingRoomClient({
     } finally {
       setIsReconnectingManual(false);
     }
-  }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName]);
+  }, [token, livekitUrl, isReconnectingManual, room, meetingId, userChoices.participantName, participantIdentity]);
 
   // If no token, present the mobile-first PreJoin screen
   if (!token) {
@@ -221,42 +311,16 @@ export default function MeetingRoomClient({
   return (
     <LiveKitRoom
       room={room}
-      video={
-        userChoices.isCamEnabled
-          ? {
-              facingMode: userChoices.facingMode || "user",
-            }
-          : false
-      }
-      audio={
-        userChoices.isMicEnabled
-          ? {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            }
-          : false
-      }
+      video={false}
+      audio={false}
       token={token}
       serverUrl={livekitUrl || undefined}
       connect={true}
       data-lk-theme="default"
-      onConnected={() => {
-        console.log("[GraceMeet][Room] Connected to LiveKit SFU");
-        setIsUnexpectedlyDisconnected(false);
-      }}
-      onDisconnected={(reason?: DisconnectReason) => {
-        console.log("[GraceMeet][Room] Room disconnected, reason:", reason);
-        if (reason === DisconnectReason.CLIENT_INITIATED) {
-          handleLeave();
-        } else {
-          // Do NOT kick user out of meeting on network drops! Show recovery dialog
-          setIsUnexpectedlyDisconnected(true);
-        }
-      }}
-      onMediaDeviceFailure={(err) => {
-        console.warn("[GraceMeet][Media] Media device notice:", err);
-      }}
+      onConnected={handleRoomConnected}
+      onDisconnected={handleRoomDisconnected}
+      onMediaDeviceFailure={handleMediaDeviceFailure}
+      onError={handleRoomError}
       className="h-[100dvh] w-screen flex flex-col bg-[#090d16] text-slate-100 overflow-hidden relative"
     >
       <RoomAudioRenderer />
