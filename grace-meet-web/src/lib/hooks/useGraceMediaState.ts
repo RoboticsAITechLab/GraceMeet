@@ -184,29 +184,37 @@ export function useGraceMediaState(
   useEffect(() => {
     if (!room || initialAcquisitionDoneRef.current) return;
 
-    let isEffectActive = true;
+    let isMounted = true;
 
     const runOrderedAcquisition = async () => {
-      if (initialAcquisitionDoneRef.current || !isEffectActive) return;
+      if (initialAcquisitionDoneRef.current || !isMounted) return;
       if (room.state !== ConnectionState.Connected) {
-        console.log("[GraceMeet][Media] Waiting for room connection before media acquisition...");
+        console.log("[GraceMeet][Media] Waiting for room connection before media acquisition... Current state:", room.state);
         return;
       }
 
       initialAcquisitionDoneRef.current = true;
+
+      // Diagnostic check for getUserMedia support in current browser context
+      const hasMediaDevices = typeof navigator !== "undefined" && !!navigator.mediaDevices;
+      const hasGetUserMedia = hasMediaDevices && typeof navigator.mediaDevices.getUserMedia === "function";
       console.log(
-        `[GraceMeet][Media] Starting ordered acquisition -> Mic: ${initialMicEnabled ? "ON" : "OFF"}, Cam: ${initialCamEnabled ? "ON" : "OFF"}`
+        `[GraceMeet][Media][Diag] Context check -> HTTPS/Localhost secure: ${typeof window !== "undefined" ? window.isSecureContext : "unknown"}, mediaDevices: ${hasMediaDevices}, getUserMedia: ${hasGetUserMedia}`
+      );
+      console.log(
+        `[GraceMeet][Media] Starting ordered acquisition -> Mic requested: ${initialMicEnabled ? "ON" : "OFF"}, Cam requested: ${initialCamEnabled ? "ON" : "OFF"} | LiveKit initial state -> Mic: ${room.localParticipant.isMicrophoneEnabled ? "ON" : "OFF"}, Cam: ${room.localParticipant.isCameraEnabled ? "ON" : "OFF"}`
       );
 
       // Brief 150ms buffer to allow browser camera/audio drivers to fully release pre-join preview tracks
       await new Promise((resolve) => setTimeout(resolve, 150));
-      if (!isEffectActive) return;
+      if (!isMounted) return;
 
-      // Step 1: Microphone acquired FIRST
-      if (initialMicEnabled) {
+      // Step 1: Microphone acquired FIRST (if not already enabled by LiveKitRoom)
+      if (initialMicEnabled && !room.localParticipant.isMicrophoneEnabled) {
         try {
           isMicPendingRef.current = true;
           setIsMicPending(true);
+          console.log("[GraceMeet][Media] Acquiring microphone track...");
           try {
             await room.localParticipant.setMicrophoneEnabled(true, {
               echoCancellation: true,
@@ -214,13 +222,19 @@ export function useGraceMediaState(
               autoGainControl: true,
             });
           } catch (micConstraintErr) {
-            console.warn("[GraceMeet][Media] Advanced mic constraints failed, retrying simple:", micConstraintErr);
+            console.warn("[GraceMeet][Media] Advanced mic constraints rejected, retrying basic:", micConstraintErr);
             await room.localParticipant.setMicrophoneEnabled(true);
           }
-          console.log("[GraceMeet][Media] Initial microphone published successfully");
+          console.log(
+            "[GraceMeet][Media] Initial microphone published successfully. Track readyState:",
+            room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack?.readyState
+          );
         } catch (err: unknown) {
           const error = formatMediaError(err, "microphone");
-          console.warn("[GraceMeet][Media] Initial mic acquisition error:", error);
+          console.error(
+            `[GraceMeet][Media] Initial mic acquisition error: [${(err as Error)?.name || "Unknown"}] ${(err as Error)?.message || String(err)}`,
+            err
+          );
           setMicError(error);
         } finally {
           isMicPendingRef.current = false;
@@ -228,25 +242,32 @@ export function useGraceMediaState(
         }
       }
 
-      // Brief 150ms stagger between mic and cam to prevent mobile hardware sensor contention
+      // Brief 150ms stagger between mic and cam to prevent hardware sensor contention
       await new Promise((resolve) => setTimeout(resolve, 150));
-      if (!isEffectActive) return;
+      if (!isMounted) return;
 
-      // Step 2: Camera acquired SECOND
-      if (initialCamEnabled) {
+      // Step 2: Camera acquired SECOND (if not already enabled by LiveKitRoom)
+      if (initialCamEnabled && !room.localParticipant.isCameraEnabled) {
         try {
           isCameraPendingRef.current = true;
           setIsCameraPending(true);
+          console.log("[GraceMeet][Media] Acquiring camera track with facingMode:", facingMode);
           try {
             await room.localParticipant.setCameraEnabled(true, { facingMode });
           } catch (camConstraintErr) {
-            console.warn("[GraceMeet][Media] FacingMode camera constraints failed, retrying generic:", camConstraintErr);
+            console.warn("[GraceMeet][Media] FacingMode camera constraints rejected, retrying generic:", camConstraintErr);
             await room.localParticipant.setCameraEnabled(true);
           }
-          console.log("[GraceMeet][Media] Initial camera published successfully");
+          console.log(
+            "[GraceMeet][Media] Initial camera published successfully. Track readyState:",
+            room.localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack?.readyState
+          );
         } catch (err: unknown) {
           const error = formatMediaError(err, "camera");
-          console.warn("[GraceMeet][Media] Initial camera acquisition error:", error);
+          console.error(
+            `[GraceMeet][Media] Initial camera acquisition error: [${(err as Error)?.name || "Unknown"}] ${(err as Error)?.message || String(err)}`,
+            err
+          );
           setCameraError(error);
         } finally {
           isCameraPendingRef.current = false;
@@ -262,7 +283,7 @@ export function useGraceMediaState(
     }
 
     return () => {
-      isEffectActive = false;
+      isMounted = false;
       room.off(RoomEvent.Connected, runOrderedAcquisition);
     };
   }, [room, initialCamEnabled, initialMicEnabled, facingMode]);
@@ -290,13 +311,21 @@ export function useGraceMediaState(
           console.warn("[GraceMeet][Media] FacingMode camera toggle failed, retrying generic:", constraintErr);
           await localParticipant.setCameraEnabled(true);
         }
+        console.log(
+          "[GraceMeet][Media] Camera enabled successfully. Track readyState:",
+          localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack?.readyState
+        );
       } else {
         await localParticipant.setCameraEnabled(false);
+        console.log("[GraceMeet][Media] Camera disabled successfully");
       }
       return localParticipant.isCameraEnabled;
     } catch (err: unknown) {
       const error = formatMediaError(err, "camera");
-      console.error("[GraceMeet][Media] Camera toggle failed:", error);
+      console.error(
+        `[GraceMeet][Media] Camera toggle error: [${(err as Error)?.name || "Unknown"}] ${(err as Error)?.message || String(err)}`,
+        err
+      );
       setCameraError(error);
       throw error;
     } finally {
@@ -332,13 +361,21 @@ export function useGraceMediaState(
           console.warn("[GraceMeet][Media] Advanced mic toggle failed, retrying generic:", constraintErr);
           await localParticipant.setMicrophoneEnabled(true);
         }
+        console.log(
+          "[GraceMeet][Media] Microphone enabled successfully. Track readyState:",
+          localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack?.readyState
+        );
       } else {
         await localParticipant.setMicrophoneEnabled(false);
+        console.log("[GraceMeet][Media] Microphone muted successfully");
       }
       return localParticipant.isMicrophoneEnabled;
     } catch (err: unknown) {
       const error = formatMediaError(err, "microphone");
-      console.error("[GraceMeet][Media] Microphone toggle failed:", error);
+      console.error(
+        `[GraceMeet][Media] Microphone toggle error: [${(err as Error)?.name || "Unknown"}] ${(err as Error)?.message || String(err)}`,
+        err
+      );
       setMicError(error);
       throw error;
     } finally {

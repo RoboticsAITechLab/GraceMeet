@@ -108,14 +108,14 @@ export default function MeetingRoomClient({
       adaptiveStream: true,
       dynacast: true,
       videoCaptureDefaults: {
-        resolution: VideoPresets.h540.resolution,
+        resolution: VideoPresets.h720.resolution,
       },
       publishDefaults: {
         simulcast: true,
         videoSimulcastLayers: [
           VideoPresets.h180,
           VideoPresets.h360,
-          VideoPresets.h540,
+          VideoPresets.h720,
         ],
         videoCodec: "vp8",
         dtx: true,
@@ -316,8 +316,22 @@ export default function MeetingRoomClient({
   return (
     <LiveKitRoom
       room={room}
-      video={false}
-      audio={false}
+      video={
+        userChoices.isCamEnabled
+          ? {
+              facingMode: userChoices.facingMode || "user",
+            }
+          : false
+      }
+      audio={
+        userChoices.isMicEnabled
+          ? {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            }
+          : false
+      }
       token={token}
       serverUrl={livekitUrl || undefined}
       connect={true}

@@ -6,7 +6,7 @@ import {
   useConnectionState,
   useLocalParticipant,
 } from "@livekit/components-react";
-import { ConnectionState, Track } from "livekit-client";
+import { ConnectionState } from "livekit-client";
 import {
   Wifi,
   WifiOff,
@@ -410,8 +410,10 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Camera Source:</span>
-                    <span className="text-slate-300">{Track.Source.Camera}</span>
+                    <span className="text-slate-500">Camera ReadyState:</span>
+                    <span className="text-slate-300">
+                      {cameraTrack?.track?.mediaStreamTrack?.readyState || "none"}
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">Microphone Track:</span>
@@ -420,9 +422,23 @@ export default function LiveKitStatus({ className = "" }: LiveKitStatusProps) {
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Microphone Source:</span>
-                    <span className="text-slate-300">{Track.Source.Microphone}</span>
+                    <span className="text-slate-500">Mic ReadyState:</span>
+                    <span className="text-slate-300">
+                      {microphoneTrack?.track?.mediaStreamTrack?.readyState || "none"}
+                    </span>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">getUserMedia API:</span>
+                    <span className="text-emerald-400">
+                      {typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getUserMedia === "function" ? "Available" : "Not Found"}
+                    </span>
+                  </div>
+                  {(lastCameraError || lastMicrophoneError) && (
+                    <div className="pt-1 text-[9px] text-rose-400 border-t border-slate-800">
+                      {lastCameraError && <div>Cam Error: {lastCameraError.message}</div>}
+                      {lastMicrophoneError && <div>Mic Error: {lastMicrophoneError.message}</div>}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
