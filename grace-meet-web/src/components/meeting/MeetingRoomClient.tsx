@@ -78,6 +78,15 @@ function getOrCreateSessionIdentity(meetingId: string, participantName: string):
   return newIdentity;
 }
 
+// Frozen module constants to eliminate prop identity churn in LiveKitRoom
+const VIDEO_USER_OPTIONS = Object.freeze({ facingMode: "user" as const });
+const VIDEO_ENV_OPTIONS = Object.freeze({ facingMode: "environment" as const });
+const AUDIO_DEFAULT_OPTIONS = Object.freeze({
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+});
+
 export default function MeetingRoomClient({
   meetingId: propMeetingId,
   roomName: propRoomName,
@@ -329,8 +338,8 @@ export default function MeetingRoomClient({
     <LiveKitRoom
       room={room}
       connectOptions={connectOptions}
-      video={userChoices.isCamEnabled ? { facingMode: userChoices.facingMode || "user" } : false}
-      audio={userChoices.isMicEnabled ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false}
+      video={userChoices.isCamEnabled ? (userChoices.facingMode === "environment" ? VIDEO_ENV_OPTIONS : VIDEO_USER_OPTIONS) : false}
+      audio={userChoices.isMicEnabled ? AUDIO_DEFAULT_OPTIONS : false}
       token={token}
       serverUrl={livekitUrl || undefined}
       connect={true}

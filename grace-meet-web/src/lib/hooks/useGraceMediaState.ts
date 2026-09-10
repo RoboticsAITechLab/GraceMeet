@@ -108,14 +108,37 @@ export function useGraceMediaState(
   initialMicEnabled: boolean = true,
   onUserChoiceChange?: (update: Partial<PreJoinChoices>) => void
 ): GraceMediaState {
-  // Phase 1: LiveKit native LocalParticipant state as Single Source of Truth
-  const { localParticipant } = useLocalParticipant({ room });
+  // Phase 1: LiveKit native LocalParticipant reactive state as Single Source of Truth
+  const {
+    localParticipant,
+    isCameraEnabled: reactiveIsCameraEnabled,
+    isMicrophoneEnabled: reactiveIsMicrophoneEnabled,
+  } = useLocalParticipant({ room });
+
+  // Reactive version bumper for LiveKit room track and mute events
+  const [, setMediaVersion] = useState(0);
+  const bumpMediaVersion = useCallback(() => setMediaVersion((v) => v + 1), []);
+
+  useEffect(() => {
+    if (!room) return;
+    room.on(RoomEvent.LocalTrackPublished, bumpMediaVersion);
+    room.on(RoomEvent.LocalTrackUnpublished, bumpMediaVersion);
+    room.on(RoomEvent.TrackMuted, bumpMediaVersion);
+    room.on(RoomEvent.TrackUnmuted, bumpMediaVersion);
+
+    return () => {
+      room.off(RoomEvent.LocalTrackPublished, bumpMediaVersion);
+      room.off(RoomEvent.LocalTrackUnpublished, bumpMediaVersion);
+      room.off(RoomEvent.TrackMuted, bumpMediaVersion);
+      room.off(RoomEvent.TrackUnmuted, bumpMediaVersion);
+    };
+  }, [room, bumpMediaVersion]);
 
   // User intent tracking refs
   const userWantsCamRef = useRef(initialCamEnabled);
   const userWantsMicRef = useRef(initialMicEnabled);
 
-  // In-flight operation guards to prevent concurrent calls
+  // In-flight operation mutex guards to serialize all media operations
   const isAcquiringCamRef = useRef(false);
   const isAcquiringMicRef = useRef(false);
   const [isCameraPending, setIsCameraPending] = useState(false);
@@ -187,9 +210,7 @@ export function useGraceMediaState(
     };
   }, [room]);
 
-  // STEP 4: Controlled Camera Recovery
-  // Recovers or acquires camera only when room is in a stable Connected state
-  // and user actively wants camera ON. No permanent one-shot locks.
+  // Controlled Camera Recovery: for mobile background-to-foreground transitions ONLY
   const recoverCamera = useCallback(async () => {
     if (!room || room.state !== ConnectionState.Connected || !localParticipant) return;
     if (isAcquiringCamRef.current || !userWantsCamRef.current) return;
@@ -215,7 +236,6 @@ export function useGraceMediaState(
         await localParticipant.setCameraEnabled(true);
       }
       setCameraError(null);
-      onUserChoiceChange?.({ isCamEnabled: true });
       console.log(
         "[GraceMeet][Media] Camera enabled/recovered successfully. Track readyState:",
         localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack?.readyState
@@ -227,33 +247,9 @@ export function useGraceMediaState(
       isAcquiringCamRef.current = false;
       setIsCameraPending(false);
     }
-  }, [room, localParticipant, facingMode, onUserChoiceChange]);
+  }, [room, localParticipant, facingMode]);
 
-  // Run controlled recovery when room becomes Connected or Reconnected
-  useEffect(() => {
-    if (!room) return;
-
-    const checkAndRecover = () => {
-      if (room.state !== ConnectionState.Connected || !localParticipant) return;
-      if (userWantsCamRef.current && !localParticipant.isCameraEnabled) {
-        recoverCamera();
-      }
-    };
-
-    if (room.state === ConnectionState.Connected) {
-      checkAndRecover();
-    }
-
-    room.on(RoomEvent.Connected, checkAndRecover);
-    room.on(RoomEvent.Reconnected, checkAndRecover);
-
-    return () => {
-      room.off(RoomEvent.Connected, checkAndRecover);
-      room.off(RoomEvent.Reconnected, checkAndRecover);
-    };
-  }, [room, localParticipant, recoverCamera]);
-
-  // Mobile Reliability: Handle backgrounding and foreground recovery
+  // Mobile Reliability: Handle backgrounding and foreground recovery (when OS killed hardware track)
   useEffect(() => {
     if (!room) return;
 
@@ -298,10 +294,12 @@ export function useGraceMediaState(
     };
   }, [room, localParticipant, recoverCamera]);
 
-  // Robust Camera Toggle: directly modifies localParticipant with generic fallback
+  // Single Authoritative Camera Toggle: serialized with mutex and in-place unmute optimization
   const toggleCamera = useCallback(async (): Promise<boolean> => {
-    if (!localParticipant || isAcquiringCamRef.current) {
-      return localParticipant?.isCameraEnabled ?? false;
+    if (!localParticipant) return false;
+    if (isAcquiringCamRef.current) {
+      console.warn("[GraceMeet][Media] Camera toggle rejected: operation already in progress");
+      return localParticipant.isCameraEnabled;
     }
 
     isAcquiringCamRef.current = true;
@@ -316,16 +314,21 @@ export function useGraceMediaState(
 
     try {
       if (nextState) {
-        try {
-          await localParticipant.setCameraEnabled(true, { facingMode });
-        } catch (constraintErr) {
-          console.warn("[GraceMeet][Media] FacingMode camera toggle rejected, retrying generic:", constraintErr);
-          await localParticipant.setCameraEnabled(true);
+        const existingPub = localParticipant.getTrackPublication(Track.Source.Camera);
+        if (existingPub && existingPub.track && existingPub.track.mediaStreamTrack?.readyState === "live") {
+          console.log("[GraceMeet][Media] Existing camera track is live, unmuting in-place...");
+          await existingPub.unmute();
+        } else {
+          try {
+            await localParticipant.setCameraEnabled(true, { facingMode });
+          } catch (constraintErr) {
+            console.warn("[GraceMeet][Media] FacingMode camera toggle rejected, retrying generic:", constraintErr);
+            await localParticipant.setCameraEnabled(true);
+          }
         }
       } else {
         await localParticipant.setCameraEnabled(false);
       }
-      onUserChoiceChange?.({ isCamEnabled: nextState });
       return localParticipant.isCameraEnabled;
     } catch (err: unknown) {
       const error = formatMediaError(err, "camera");
@@ -336,12 +339,14 @@ export function useGraceMediaState(
       isAcquiringCamRef.current = false;
       setIsCameraPending(false);
     }
-  }, [localParticipant, facingMode, onUserChoiceChange]);
+  }, [localParticipant, facingMode]);
 
-  // Robust Microphone Toggle: directly modifies localParticipant with generic fallback
+  // Single Authoritative Microphone Toggle: serialized with mutex and in-place unmute optimization
   const toggleMicrophone = useCallback(async (): Promise<boolean> => {
-    if (!localParticipant || isAcquiringMicRef.current) {
-      return localParticipant?.isMicrophoneEnabled ?? false;
+    if (!localParticipant) return false;
+    if (isAcquiringMicRef.current) {
+      console.warn("[GraceMeet][Media] Microphone toggle rejected: operation already in progress");
+      return localParticipant.isMicrophoneEnabled;
     }
 
     isAcquiringMicRef.current = true;
@@ -356,20 +361,25 @@ export function useGraceMediaState(
 
     try {
       if (nextState) {
-        try {
-          await localParticipant.setMicrophoneEnabled(true, {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          });
-        } catch (constraintErr) {
-          console.warn("[GraceMeet][Media] Advanced mic toggle rejected, retrying generic:", constraintErr);
-          await localParticipant.setMicrophoneEnabled(true);
+        const existingPub = localParticipant.getTrackPublication(Track.Source.Microphone);
+        if (existingPub && existingPub.track && existingPub.track.mediaStreamTrack?.readyState === "live") {
+          console.log("[GraceMeet][Media] Existing mic track is live, unmuting in-place...");
+          await existingPub.unmute();
+        } else {
+          try {
+            await localParticipant.setMicrophoneEnabled(true, {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            });
+          } catch (constraintErr) {
+            console.warn("[GraceMeet][Media] Advanced mic toggle rejected, retrying generic:", constraintErr);
+            await localParticipant.setMicrophoneEnabled(true);
+          }
         }
       } else {
         await localParticipant.setMicrophoneEnabled(false);
       }
-      onUserChoiceChange?.({ isMicEnabled: nextState });
       return localParticipant.isMicrophoneEnabled;
     } catch (err: unknown) {
       const error = formatMediaError(err, "microphone");
@@ -380,7 +390,7 @@ export function useGraceMediaState(
       isAcquiringMicRef.current = false;
       setIsMicPending(false);
     }
-  }, [localParticipant, onUserChoiceChange]);
+  }, [localParticipant]);
 
   // Flip Camera: uses native LiveKit restartTrack to seamlessly swap camera sensors
   const flipCamera = useCallback(async () => {
@@ -436,13 +446,16 @@ export function useGraceMediaState(
   }, []);
 
   const syncMediaState = useCallback(() => {
-    // Media state is reactively driven by LiveKit's useLocalParticipant.
-  }, []);
+    bumpMediaVersion();
+  }, [bumpMediaVersion]);
 
-  // STEP 3: Single Source of Truth
-  // Authoritative publication states derived directly from LiveKit's LocalParticipant
-  const isCameraEnabled = localParticipant ? localParticipant.isCameraEnabled : false;
-  const isMicrophoneEnabled = localParticipant ? localParticipant.isMicrophoneEnabled : false;
+  // Single Source of Truth: Authoritative publication states derived reactively from LiveKit
+  const isCameraEnabled = localParticipant
+    ? (reactiveIsCameraEnabled ?? localParticipant.isCameraEnabled)
+    : false;
+  const isMicrophoneEnabled = localParticipant
+    ? (reactiveIsMicrophoneEnabled ?? localParticipant.isMicrophoneEnabled)
+    : false;
 
   const cameraPublication = localParticipant?.getTrackPublication(
     Track.Source.Camera
